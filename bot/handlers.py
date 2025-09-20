@@ -7,7 +7,7 @@ from typing import Optional
 
 from dateutil import parser, tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 
 from .config import Settings
 from .storage import Database
@@ -43,11 +43,32 @@ def _parse_new_args(arg: str) -> Optional[dict]:
 
 class BotApp:
     """Assembles the Telegram Application and command handlers."""
+    # Conversation states
+    STATE_TOPIC = 1
+    STATE_DESCRIPTION = 2
+    STATE_MAX = 3
+    STATE_LOCATION = 4
+    STATE_DATETIME = 5
+
     def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler):
         self.settings = settings
         self.db = db
         self.scheduler = scheduler
         self.local_tz = tz.gettz(settings.tz)
+
+    def _build_create_meeting_conversation(self) -> ConversationHandler:
+        return ConversationHandler(
+            entry_points=[CommandHandler("create_meeting", self.conv_start)],
+            states={
+                self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_topic)],
+                self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_description)],
+                self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_max)],
+                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_location)],
+                self.STATE_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_datetime)],
+            },
+            fallbacks=[CommandHandler("cancel", self.conv_cancel)],
+            allow_reentry=True,
+        )
 
     def build(self) -> Application:
         """Create and configure the PTB Application with command handlers."""
@@ -56,7 +77,8 @@ class BotApp:
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))
         app.add_handler(CommandHandler("upcoming_meetings", self.cmd_meetings))
         app.add_handler(CommandHandler("my_meetings", self.cmd_my))
-        app.add_handler(CommandHandler("create_meeting", self.cmd_new))
+        # Conversation handler for creating a meeting interactively in Russian
+        app.add_handler(self._build_create_meeting_conversation())
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
@@ -72,6 +94,129 @@ class BotApp:
         app.post_init = on_start
         app.post_shutdown = on_stop
         return app
+
+    # ==== Conversation handlers for /create_meeting (Russian) ====
+    async def conv_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user:
+            return ConversationHandler.END
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        context.user_data.clear()
+        await update.effective_message.reply_text(
+            "Создаём новую встречу! Как она называется?"
+        )
+        return self.STATE_TOPIC
+
+    async def conv_topic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        topic = (update.effective_message.text or "").strip()
+        if not topic:
+            await update.effective_message.reply_text("Пожалуйста, укажи название встречи.")
+            return self.STATE_TOPIC
+        context.user_data["topic"] = topic
+        await update.effective_message.reply_text(
+            f"Принято! Название встречи: ‘{topic}’.\nПожалуйста, напиши описание встречи"
+        )
+        return self.STATE_DESCRIPTION
+
+    async def conv_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        desc = (update.effective_message.text or "").strip()
+        if not desc:
+            await update.effective_message.reply_text("Пожалуйста, напиши описание встречи")
+            return self.STATE_DESCRIPTION
+        context.user_data["description"] = desc
+        await update.effective_message.reply_text(
+            "Принято! Описание получено.\nПожалуйста, укажи максимальное количество участников для этой встречи.\nПример: 20"
+        )
+        return self.STATE_MAX
+
+    async def conv_max(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (update.effective_message.text or "").strip()
+        try:
+            max_p = int(text)
+            if max_p <= 0:
+                raise ValueError
+        except Exception:
+            await update.effective_message.reply_text(
+                "Не удалось распознать число. Пожалуйста, укажи максимальное количество участников. Пример: 20"
+            )
+            return self.STATE_MAX
+        context.user_data["max_participants"] = max_p
+        await update.effective_message.reply_text(
+            f"Принято! Максимум участников: {max_p}.\nПожалуйста, укажи место проведения встречи (необязательно).\nПример: Cafe Circle Coffee"
+        )
+        return self.STATE_LOCATION
+
+    async def conv_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        raw = (update.effective_message.text or "").strip()
+        skip_values = {"", "-", "—", "пропустить", "нет"}
+        location = None if raw.lower() in skip_values else raw
+        context.user_data["location"] = location
+        received = "не указано" if not location else f"{location}"
+        await update.effective_message.reply_text(
+            f"Принято! Место проведения: {received}.\nПожалуйста, укажи дату и время начала по Берлину в следующем формате: дд.мм чч.мм"
+        )
+        return self.STATE_DATETIME
+
+    async def conv_datetime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (update.effective_message.text or "").strip()
+        parts = text.split()
+        if len(parts) != 2:
+            await update.effective_message.reply_text(
+                "Неверный формат. Пожалуйста, укажи дату и время в формате: дд.мм чч.мм (например: 20.09 18.30)"
+            )
+            return self.STATE_DATETIME
+        day_str, time_str = parts
+        now_local = datetime.now(self.local_tz)
+        try:
+            # Compose with current year
+            dt = datetime.strptime(f"{day_str} {time_str} {now_local.year}", "%d.%m %H.%M %Y")
+        except Exception:
+            await update.effective_message.reply_text(
+                "Не удалось разобрать дату/время. Используй формат: дд.мм чч.мм (например: 20.09 18.30)"
+            )
+            return self.STATE_DATETIME
+        # Attach local tz (Berlin) and convert to UTC
+        local_dt = dt.replace(tzinfo=self.local_tz)
+        start_utc = local_dt.astimezone(tz.UTC)
+
+        # Collect data
+        user = update.effective_user
+        if not user:
+            await update.effective_message.reply_text("Произошла ошибка. Попробуй ещё раз позже.")
+            return ConversationHandler.END
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        topic = context.user_data.get("topic")
+        description = context.user_data.get("description")
+        max_participants = context.user_data.get("max_participants")
+        location = context.user_data.get("location")
+
+        meeting = await self.db.create_meeting(
+            host_id=user.id,
+            topic=topic,
+            description=description,
+            start_at_utc=start_utc,
+            max_participants=max_participants,
+            location=location,
+        )
+        self.scheduler.schedule_meeting_reminders(meeting)
+        when_local = meeting.start_at_utc.astimezone(self.local_tz)
+        summary = (
+            "Спасибо! Встреча создана.\n\n"
+            f"Название: {topic}\n"
+            f"Описание: {description}\n"
+            f"Дата и время (Берлин): {when_local:%d.%m %H:%M}\n"
+            f"Место: {location or 'не указано'}\n"
+            f"Максимум участников: {max_participants}\n"
+            f"ID встречи: #{meeting.id}"
+        )
+        await update.effective_message.reply_text(summary)
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def conv_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data.clear()
+        await update.effective_message.reply_text("Создание встречи отменено.")
+        return ConversationHandler.END
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start and /help: greet user and list commands."""
