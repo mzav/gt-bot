@@ -58,17 +58,17 @@ class BotApp:
         self.scheduler = scheduler
         self.local_tz = tz.gettz(settings.tz)
 
-    def _build_create_meeting_conversation(self) -> ConversationHandler:
+    def cmd_create_meeting(self) -> ConversationHandler:
         return ConversationHandler(
-            entry_points=[CommandHandler("create_meeting", self.conv_start)],
+            entry_points=[CommandHandler("create_meeting", self._create_meeting_start)],
             states={
-                self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_topic)],
-                self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_description)],
-                self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_max)],
-                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_location)],
-                self.STATE_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.conv_datetime)],
+                self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)],
+                self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)],
+                self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
+                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
+                self.STATE_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_datetime)],
             },
-            fallbacks=[CommandHandler("cancel", self.conv_cancel)],
+            fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
             allow_reentry=True,
         )
 
@@ -80,7 +80,7 @@ class BotApp:
         app.add_handler(CommandHandler("upcoming_meetings", self.cmd_meetings))
         app.add_handler(CommandHandler("my_meetings", self.cmd_my))
         # Conversation handler for creating a meeting interactively in Russian
-        app.add_handler(self._build_create_meeting_conversation())
+        app.add_handler(self.cmd_create_meeting())
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
@@ -98,7 +98,7 @@ class BotApp:
         return app
 
     # ==== Conversation handlers for /create_meeting (Russian) ====
-    async def conv_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not user:
             return ConversationHandler.END
@@ -109,7 +109,7 @@ class BotApp:
         )
         return self.STATE_TOPIC
 
-    async def conv_topic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_topic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = (update.effective_message.text or "").strip()
         if not topic:
             await update.effective_message.reply_text("Пожалуйста, укажи название встречи.")
@@ -120,7 +120,7 @@ class BotApp:
         )
         return self.STATE_DESCRIPTION
 
-    async def conv_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         desc = (update.effective_message.text or "").strip()
         if not desc:
             await update.effective_message.reply_text("Пожалуйста, напиши описание встречи")
@@ -131,7 +131,7 @@ class BotApp:
         )
         return self.STATE_MAX
 
-    async def conv_max(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_max_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (update.effective_message.text or "").strip()
         try:
             max_p = int(text)
@@ -148,7 +148,7 @@ class BotApp:
         )
         return self.STATE_LOCATION
 
-    async def conv_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_max_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = (update.effective_message.text or "").strip()
         skip_values = {"", "-", "—", "пропустить", "нет"}
         location = None if raw.lower() in skip_values else raw
@@ -159,7 +159,7 @@ class BotApp:
         )
         return self.STATE_DATETIME
 
-    async def conv_datetime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_datetime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (update.effective_message.text or "").strip()
         parts = text.split()
         if len(parts) != 2:
@@ -215,7 +215,7 @@ class BotApp:
         context.user_data.clear()
         return ConversationHandler.END
 
-    async def conv_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.effective_message.reply_text("Создание встречи отменено.")
         return ConversationHandler.END
@@ -296,50 +296,6 @@ class BotApp:
                 ]]
             )
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
-
-    async def cmd_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        if not user:
-            return
-        await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        if not context.args:
-            await update.effective_message.reply_text(
-                "Usage: /create_meeting topic | description | YYYY-MM-DD HH:MM | max | location(optional)"
-            )
-            return
-        arg = " ".join(context.args)
-        parsed = _parse_new_args(arg)
-        if parsed is None:
-            await update.effective_message.reply_text(
-                "Could not parse your input. Make sure to use pipes '|' and a valid integer for max participants."
-            )
-            return
-        # Parse datetime in local tz and convert to UTC
-        try:
-            local_dt = parser.parse(parsed["dt_str"])  # user-supplied local time
-            if local_dt.tzinfo is None:
-                local_dt = local_dt.replace(tzinfo=self.local_tz)
-            start_utc = local_dt.astimezone(tz.UTC)
-        except Exception:
-            await update.effective_message.reply_text("Invalid date/time. Example: 2025-09-12 18:30")
-            return
-        meeting = await self.db.create_meeting(
-            host_id=user.id,
-            topic=parsed["topic"],
-            description=parsed["description"],
-            start_at_utc=start_utc,
-            max_participants=parsed["max_participants"],
-            location=parsed["location"],
-        )
-        # schedule reminders
-        self.scheduler.schedule_meeting_reminders(meeting)
-        when_local = meeting.start_at_utc.astimezone(self.local_tz)
-        await update.effective_message.reply_text(
-            f"Created meeting #{meeting.id}: {meeting.topic}\n"
-            f"When: {when_local:%Y-%m-%d %H:%M}\n"
-            f"Where: {meeting.location or 'TBA'}\n"
-            f"Max: {meeting.max_participants}\n"
-        )
 
     async def cmd_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
