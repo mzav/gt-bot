@@ -7,6 +7,7 @@ from typing import Optional
 
 from dateutil import parser, tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
 from .config import Settings
@@ -81,15 +82,20 @@ class BotApp:
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         # TODO change welcome message
         msg = (
-            "Welcome to Girl Talk Berlin Meetings Bot!\n\n"
-            "Commands:\n"
-            "/create_meeting topic | description | YYYY-MM-DD HH:MM | max | location\n"
-            "/upcoming_meetings — list all upcoming\n"
-            "/my_meetings — my meetings\n"
-            "/register <id> — register\n"
-            "/unregister <id> — unregister\n"
+            "🌸 Добро пожаловать в GirlTalkBot! 🌸\n\n"
+            "Я помогаю комьюнити Girl Talk легко создавать и вести встречи.\n\n"
+            "Доступные команды:\n"
+            "📝 /create_meeting — создать встречу topic | description | YYYY-MM-DD HH:MM | max | location\n"
+            "📅 /upcoming_meetings — все события\n"
+            "📗 /my_meetings — мои встречи\n"
+            "❓ /help — показать помощь\n\n"
+            "👉 Не забудь вступить в <a href='https://t.me/+AI-HCuAXy204NWQy'>канал с анонсами</a> 👈\n\n"
+            "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
+            "Давай делать вместе организацию встреч проще! ✨"
         )
-        await update.effective_message.reply_text(msg)
+        await update.effective_message.reply_text(msg,
+                                                  parse_mode=ParseMode.HTML,
+                                                  disable_web_page_preview=True)
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         now_utc = datetime.utcnow().replace(tzinfo=tz.UTC)
