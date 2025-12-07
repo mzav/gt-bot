@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 from dateutil import parser, tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 from telegram.constants import ParseMode
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 
 from .config import Settings
 from .storage import Database
@@ -18,9 +18,60 @@ from .scheduler import BotScheduler
 logger = logging.getLogger(__name__)
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure datetime has UTC timezone attached (SQLite loses tzinfo)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz.UTC)
+    return dt
+
+
+# Russian translations for calendar steps
+LSTEP_RU = {"y": "год", "m": "месяц", "d": "день"}
+
+# Time picker configuration
+HOUR_START = 6   # First available hour
+HOUR_END = 23    # Last available hour
+MINUTE_OPTIONS = [0, 15, 30, 45]  # Available minute increments
+
+
+class MeetingCalendar(DetailedTelegramCalendar):
+    """Calendar with Russian month/day names."""
+    prev_button = "⬅️"
+    next_button = "➡️"
+    empty_month_button = ""
+    empty_year_button = ""
+
+
+def _build_hour_keyboard() -> InlineKeyboardMarkup:
+    """Build an inline keyboard with hour buttons (08:00 - 23:00)."""
+    keyboard = []
+    row = []
+    for h in range(HOUR_START, HOUR_END + 1):
+        row.append(InlineKeyboardButton(f"{h:02d}:00", callback_data=f"hour:{h}"))
+        if len(row) == 4:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_minute_keyboard(hour: int) -> InlineKeyboardMarkup:
+    """Build an inline keyboard with minute options for the selected hour."""
+    keyboard = []
+    row = []
+    for m in MINUTE_OPTIONS:
+        label = f"{hour:02d}:{m:02d}"
+        row.append(InlineKeyboardButton(label, callback_data=f"time:{hour}:{m}"))
+    keyboard.append(row)
+    # Add back button
+    keyboard.append([InlineKeyboardButton("⬅️ Назад к выбору часа", callback_data="hour:back")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def _format_meeting_line(m, local_tz) -> str:
     """Format a one-line summary of a meeting in the given local timezone."""
-    when_local = m.start_at_utc.astimezone(local_tz)
+    when_local = _ensure_utc(m.start_at_utc).astimezone(local_tz)
     return f"#{m.id} — {m.topic} — {when_local:%Y-%m-%d %H:%M} — {m.location or 'TBA'}"
 
 
@@ -50,7 +101,9 @@ class BotApp:
     STATE_DESCRIPTION = 2
     STATE_MAX = 3
     STATE_LOCATION = 4
-    STATE_DATETIME = 5
+    STATE_DATE = 5
+    STATE_HOUR = 6
+    STATE_MINUTE = 7
 
     def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler):
         self.settings = settings
@@ -65,8 +118,13 @@ class BotApp:
                 self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)],
                 self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)],
                 self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
-                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
-                self.STATE_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_datetime)],
+                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)],
+                self.STATE_DATE: [CallbackQueryHandler(self._create_meeting_calendar_callback, pattern=r"^cbcal_")],
+                self.STATE_HOUR: [CallbackQueryHandler(self._create_meeting_hour_callback, pattern=r"^hour:")],
+                self.STATE_MINUTE: [
+                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
+                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
+                ],
             },
             fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
             allow_reentry=True,
@@ -148,44 +206,130 @@ class BotApp:
         )
         return self.STATE_LOCATION
 
-    async def _create_meeting_max_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = (update.effective_message.text or "").strip()
         skip_values = {"", "-", "—", "пропустить", "нет"}
         location = None if raw.lower() in skip_values else raw
         context.user_data["location"] = location
         received = "не указано" if not location else f"{location}"
+        # Show calendar for date selection
+        calendar, step = MeetingCalendar(calendar_id=1, min_date=date.today()).build()
         await update.effective_message.reply_text(
-            f"Принято! Место проведения: {received}.\nПожалуйста, укажи дату и время начала по Берлину в следующем формате: дд.мм чч.мм"
+            f"Принято! Место проведения: {received}.\n\n📅 Выбери дату встречи (выбери {LSTEP_RU[step]}):",
+            reply_markup=calendar
         )
-        return self.STATE_DATETIME
+        return self.STATE_DATE
 
-    async def _create_meeting_datetime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = (update.effective_message.text or "").strip()
-        parts = text.split()
-        if len(parts) != 2:
-            await update.effective_message.reply_text(
-                "Неверный формат. Пожалуйста, укажи дату и время в формате: дд.мм чч.мм (например: 20.09 18.30)"
+    async def _create_meeting_calendar_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle calendar button presses for date selection."""
+        query = update.callback_query
+        if not query:
+            return self.STATE_DATE
+        await query.answer()
+
+        result, key, step = MeetingCalendar(calendar_id=1, min_date=date.today()).process(query.data)
+
+        if not result and key:
+            # User is still navigating the calendar
+            await query.edit_message_text(
+                f"📅 Выбери дату встречи (выбери {LSTEP_RU[step]}):",
+                reply_markup=key
             )
-            return self.STATE_DATETIME
-        day_str, time_str = parts
-        now_local = datetime.now(self.local_tz)
+            return self.STATE_DATE
+
+        if result:
+            # Date selected, store it and show hour picker
+            context.user_data["selected_date"] = result
+            await query.edit_message_text(
+                f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                reply_markup=_build_hour_keyboard()
+            )
+            return self.STATE_HOUR
+
+        return self.STATE_DATE
+
+    async def _create_meeting_hour_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle hour button presses for time selection."""
+        query = update.callback_query
+        if not query:
+            return self.STATE_HOUR
+        await query.answer()
+
+        data = query.data or ""
         try:
-            # Compose with current year
-            dt = datetime.strptime(f"{day_str} {time_str} {now_local.year}", "%d.%m %H.%M %Y")
+            _, hour_str = data.split(":", 1)
+            if hour_str == "back":
+                # User wants to go back to hour selection - but we're already there
+                # This shouldn't happen in STATE_HOUR, but handle gracefully
+                await query.edit_message_text(
+                    f"📅 Дата: {context.user_data.get('selected_date'):%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                    reply_markup=_build_hour_keyboard()
+                )
+                return self.STATE_HOUR
+            hour = int(hour_str)
         except Exception:
-            await update.effective_message.reply_text(
-                "Не удалось разобрать дату/время. Используй формат: дд.мм чч.мм (например: 20.09 18.30)"
+            await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
+            return self.STATE_HOUR
+
+        # Store selected hour and show minute picker
+        context.user_data["selected_hour"] = hour
+        selected_date = context.user_data.get("selected_date")
+        await query.edit_message_text(
+            f"📅 Дата: {selected_date:%d.%m.%Y}\n🕐 Час: {hour:02d}:00\n\n⏱ Выбери минуты:",
+            reply_markup=_build_minute_keyboard(hour)
+        )
+        return self.STATE_MINUTE
+
+    async def _create_meeting_minute_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle minute button presses and create the meeting."""
+        query = update.callback_query
+        if not query:
+            return self.STATE_MINUTE
+        await query.answer()
+
+        data = query.data or ""
+        
+        # Check if user wants to go back to hour selection
+        if data == "hour:back":
+            selected_date = context.user_data.get("selected_date")
+            await query.edit_message_text(
+                f"📅 Дата: {selected_date:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                reply_markup=_build_hour_keyboard()
             )
-            return self.STATE_DATETIME
-        # Attach local tz (Berlin) and convert to UTC
-        local_dt = dt.replace(tzinfo=self.local_tz)
+            return self.STATE_HOUR
+
+        # Extract hour and minute from callback data (format: "time:HH:MM")
+        try:
+            _, hour_str, minute_str = data.split(":")
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except Exception:
+            await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
+            return self.STATE_MINUTE
+
+        # Combine date and time
+        selected_date = context.user_data.get("selected_date")
+        if not selected_date:
+            await query.edit_message_text("Ошибка: дата не выбрана. Начни заново с /create_meeting")
+            return ConversationHandler.END
+
+        # Create datetime in local timezone and convert to UTC
+        local_dt = datetime(
+            year=selected_date.year,
+            month=selected_date.month,
+            day=selected_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=self.local_tz
+        )
         start_utc = local_dt.astimezone(tz.UTC)
 
-        # Collect data
+        # Collect all data and create meeting
         user = update.effective_user
         if not user:
-            await update.effective_message.reply_text("Произошла ошибка. Попробуй ещё раз позже.")
+            await query.edit_message_text("Произошла ошибка. Попробуй ещё раз позже.")
             return ConversationHandler.END
+
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         topic = context.user_data.get("topic")
         description = context.user_data.get("description")
@@ -201,17 +345,17 @@ class BotApp:
             location=location,
         )
         self.scheduler.schedule_meeting_reminders(meeting)
-        when_local = meeting.start_at_utc.astimezone(self.local_tz)
+        when_local = _ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
         summary = (
-            "Спасибо! Встреча создана.\n\n"
-            f"Название: {topic}\n"
-            f"Описание: {description}\n"
-            f"Дата и время (Берлин): {when_local:%d.%m %H:%M}\n"
-            f"Место: {location or 'не указано'}\n"
-            f"Максимум участников: {max_participants}\n"
-            f"ID встречи: #{meeting.id}"
+            "✅ Спасибо! Встреча создана.\n\n"
+            f"📌 Название: {topic}\n"
+            f"📝 Описание: {description}\n"
+            f"📅 Дата и время (Берлин): {when_local:%d.%m.%Y %H:%M}\n"
+            f"📍 Место: {location or 'не указано'}\n"
+            f"👥 Максимум участников: {max_participants}\n"
+            f"🆔 ID встречи: #{meeting.id}"
         )
-        await update.effective_message.reply_text(summary)
+        await query.edit_message_text(summary)
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -251,7 +395,7 @@ class BotApp:
             return
         # Send each meeting as a separate message with a register button
         for m in meetings:
-            when_local = m.start_at_utc.astimezone(self.local_tz)
+            when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             available = max(m.max_participants - confirmed, 0)
@@ -279,7 +423,7 @@ class BotApp:
             await update.effective_message.reply_text("You have no meetings yet.")
             return
         for m in meetings:
-            when_local = m.start_at_utc.astimezone(self.local_tz)
+            when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             available = max(m.max_participants - confirmed, 0)
@@ -366,7 +510,7 @@ class BotApp:
         if not m:
             await cq.message.reply_text("Meeting not found.")
             return
-        when_local = m.start_at_utc.astimezone(self.local_tz)
+        when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
         date_str = when_local.strftime("%A, %d %B %Y")
         time_str = when_local.strftime("%H:%M")
         host_user = await self.db.get_user(m.created_by)
