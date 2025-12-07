@@ -65,7 +65,7 @@ class BotApp:
                 self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)],
                 self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)],
                 self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
-                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
+                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)],
                 self.STATE_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_datetime)],
             },
             fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
@@ -148,7 +148,7 @@ class BotApp:
         )
         return self.STATE_LOCATION
 
-    async def _create_meeting_max_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _create_meeting_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = (update.effective_message.text or "").strip()
         skip_values = {"", "-", "—", "пропустить", "нет"}
         location = None if raw.lower() in skip_values else raw
