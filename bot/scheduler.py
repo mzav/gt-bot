@@ -13,12 +13,7 @@ from dateutil import tz
 
 from .storage import Database
 from .models import Meeting
-
-def _ensure_utc(dt: datetime) -> datetime:
-    """Ensure datetime has UTC timezone attached (SQLite loses tzinfo)."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=tz.UTC)
-    return dt
+from .utils import ensure_utc
 
 @dataclass
 class ReminderCallbacks:
@@ -47,7 +42,7 @@ class BotScheduler:
     def schedule_meeting_reminders(self, meeting: Meeting) -> None:
         """Schedule reminder jobs relative to the meeting start time."""
         # Schedule 3 days and 1 day before
-        start_utc = _ensure_utc(meeting.start_at_utc)
+        start_utc = ensure_utc(meeting.start_at_utc)
         for days_before in (3, 1):
             run_at = start_utc - timedelta(days=days_before)
             now = datetime.now(tz.UTC)
@@ -89,7 +84,7 @@ class BotScheduler:
         else:
             lines = ["Upcoming meetings:"]
             for m in meetings[:10]:
-                when_local = _ensure_utc(m.start_at_utc).astimezone(self._tz)
+                when_local = ensure_utc(m.start_at_utc).astimezone(self._tz)
                 lines.append(f"#{m.id} {m.topic} — {when_local:%Y-%m-%d %H:%M} @ {m.location or 'TBA'}")
             text = "\n".join(lines)
         await self._send_channel_message(channel_id, text)

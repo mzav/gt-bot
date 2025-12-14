@@ -5,73 +5,36 @@ import logging
 from datetime import datetime, date
 from typing import Optional
 
-from dateutil import parser, tz
+from dateutil import tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 from telegram.constants import ParseMode
-from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 
 from .config import Settings
 from .storage import Database
 from .scheduler import BotScheduler
+from .utils import ensure_utc
+from .keyboards import (
+    MeetingCalendar,
+    TimePickerKeyboard,
+    LSTEP_TRANSLATIONS,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_utc(dt: datetime) -> datetime:
-    """Ensure datetime has UTC timezone attached (SQLite loses tzinfo)."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=tz.UTC)
-    return dt
-
-
-# Russian translations for calendar steps
-LSTEP_RU = {"y": "год", "m": "месяц", "d": "день"}
-
-# Time picker configuration
-HOUR_START = 6   # First available hour
-HOUR_END = 23    # Last available hour
-MINUTE_OPTIONS = [0, 15, 30, 45]  # Available minute increments
-
-
-class MeetingCalendar(DetailedTelegramCalendar):
-    """Calendar with Russian month/day names."""
-    prev_button = "⬅️"
-    next_button = "➡️"
-    empty_month_button = ""
-    empty_year_button = ""
-
-
-def _build_hour_keyboard() -> InlineKeyboardMarkup:
-    """Build an inline keyboard with hour buttons (08:00 - 23:00)."""
-    keyboard = []
-    row = []
-    for h in range(HOUR_START, HOUR_END + 1):
-        row.append(InlineKeyboardButton(f"{h:02d}:00", callback_data=f"hour:{h}"))
-        if len(row) == 4:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    return InlineKeyboardMarkup(keyboard)
-
-
-def _build_minute_keyboard(hour: int) -> InlineKeyboardMarkup:
-    """Build an inline keyboard with minute options for the selected hour."""
-    keyboard = []
-    row = []
-    for m in MINUTE_OPTIONS:
-        label = f"{hour:02d}:{m:02d}"
-        row.append(InlineKeyboardButton(label, callback_data=f"time:{hour}:{m}"))
-    keyboard.append(row)
-    # Add back button
-    keyboard.append([InlineKeyboardButton("⬅️ Назад к выбору часа", callback_data="hour:back")])
-    return InlineKeyboardMarkup(keyboard)
-
-
 def _format_meeting_line(m, local_tz) -> str:
     """Format a one-line summary of a meeting in the given local timezone."""
-    when_local = _ensure_utc(m.start_at_utc).astimezone(local_tz)
+    when_local = ensure_utc(m.start_at_utc).astimezone(local_tz)
     return f"#{m.id} — {m.topic} — {when_local:%Y-%m-%d %H:%M} — {m.location or 'TBA'}"
 
 
@@ -91,12 +54,19 @@ def _parse_new_args(arg: str) -> Optional[dict]:
         max_p = int(max_str)
     except Exception:
         return None
-    return {"topic": topic, "description": description, "dt_str": dt_str, "max_participants": max_p, "location": location}
+    return {
+        "topic": topic,
+        "description": description,
+        "dt_str": dt_str,
+        "max_participants": max_p,
+        "location": location,
+    }
 
 
 class BotApp:
     """Assembles the Telegram Application and command handlers."""
-    # Conversation states
+
+    # Conversation states for the create_meeting flow
     STATE_TOPIC = 1
     STATE_DESCRIPTION = 2
     STATE_MAX = 3
@@ -111,25 +81,6 @@ class BotApp:
         self.scheduler = scheduler
         self.local_tz = tz.gettz(settings.tz)
 
-    def cmd_create_meeting(self) -> ConversationHandler:
-        return ConversationHandler(
-            entry_points=[CommandHandler("create_meeting", self._create_meeting_start)],
-            states={
-                self.STATE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)],
-                self.STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)],
-                self.STATE_MAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)],
-                self.STATE_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)],
-                self.STATE_DATE: [CallbackQueryHandler(self._create_meeting_calendar_callback, pattern=r"^cbcal_")],
-                self.STATE_HOUR: [CallbackQueryHandler(self._create_meeting_hour_callback, pattern=r"^hour:")],
-                self.STATE_MINUTE: [
-                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
-                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
-                ],
-            },
-            fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
-            allow_reentry=True,
-        )
-
     def build(self) -> Application:
         """Create and configure the PTB Application with command handlers."""
         app = ApplicationBuilder().token(self.settings.telegram_bot_token).build()
@@ -137,8 +88,7 @@ class BotApp:
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))
         app.add_handler(CommandHandler("upcoming_meetings", self.cmd_meetings))
         app.add_handler(CommandHandler("my_meetings", self.cmd_my))
-        # Conversation handler for creating a meeting interactively in Russian
-        app.add_handler(self.cmd_create_meeting())
+        app.add_handler(self._build_create_meeting_handler())
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
@@ -155,7 +105,40 @@ class BotApp:
         app.post_shutdown = on_stop
         return app
 
-    # ==== Conversation handlers for /create_meeting (Russian) ====
+    def _build_create_meeting_handler(self) -> ConversationHandler:
+        """Build the conversation handler for interactive meeting creation."""
+        return ConversationHandler(
+            entry_points=[CommandHandler("create_meeting", self._create_meeting_start)],
+            states={
+                self.STATE_TOPIC: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)
+                ],
+                self.STATE_DESCRIPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)
+                ],
+                self.STATE_MAX: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)
+                ],
+                self.STATE_LOCATION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)
+                ],
+                self.STATE_DATE: [
+                    CallbackQueryHandler(self._create_meeting_calendar_callback, pattern=r"^cbcal_")
+                ],
+                self.STATE_HOUR: [
+                    CallbackQueryHandler(self._create_meeting_hour_callback, pattern=r"^hour:")
+                ],
+                self.STATE_MINUTE: [
+                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
+                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
+            allow_reentry=True,
+        )
+
+    # ========== Create Meeting Conversation Handlers ==========
+
     async def _create_meeting_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not user:
@@ -215,7 +198,8 @@ class BotApp:
         # Show calendar for date selection
         calendar, step = MeetingCalendar(calendar_id=1, min_date=date.today()).build()
         await update.effective_message.reply_text(
-            f"Принято! Место проведения: {received}.\n\n📅 Выбери дату встречи (выбери {LSTEP_RU[step]}):",
+            f"Принято! Место проведения: {received}.\n\n"
+            f"📅 Выбери дату встречи (выбери {LSTEP_TRANSLATIONS[step]}):",
             reply_markup=calendar
         )
         return self.STATE_DATE
@@ -232,7 +216,7 @@ class BotApp:
         if not result and key:
             # User is still navigating the calendar
             await query.edit_message_text(
-                f"📅 Выбери дату встречи (выбери {LSTEP_RU[step]}):",
+                f"📅 Выбери дату встречи (выбери {LSTEP_TRANSLATIONS[step]}):",
                 reply_markup=key
             )
             return self.STATE_DATE
@@ -242,7 +226,7 @@ class BotApp:
             context.user_data["selected_date"] = result
             await query.edit_message_text(
                 f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                reply_markup=_build_hour_keyboard()
+                reply_markup=TimePickerKeyboard.build_hours()
             )
             return self.STATE_HOUR
 
@@ -259,11 +243,11 @@ class BotApp:
         try:
             _, hour_str = data.split(":", 1)
             if hour_str == "back":
-                # User wants to go back to hour selection - but we're already there
-                # This shouldn't happen in STATE_HOUR, but handle gracefully
+                # User wants to go back to hour selection - already here, just refresh
                 await query.edit_message_text(
-                    f"📅 Дата: {context.user_data.get('selected_date'):%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                    reply_markup=_build_hour_keyboard()
+                    f"📅 Дата: {context.user_data.get('selected_date'):%d.%m.%Y}\n\n"
+                    "🕐 Выбери час начала встречи:",
+                    reply_markup=TimePickerKeyboard.build_hours()
                 )
                 return self.STATE_HOUR
             hour = int(hour_str)
@@ -275,8 +259,10 @@ class BotApp:
         context.user_data["selected_hour"] = hour
         selected_date = context.user_data.get("selected_date")
         await query.edit_message_text(
-            f"📅 Дата: {selected_date:%d.%m.%Y}\n🕐 Час: {hour:02d}:00\n\n⏱ Выбери минуты:",
-            reply_markup=_build_minute_keyboard(hour)
+            f"📅 Дата: {selected_date:%d.%m.%Y}\n"
+            f"🕐 Час: {hour:02d}:00\n\n"
+            "⏱ Выбери минуты:",
+            reply_markup=TimePickerKeyboard.build_minutes(hour)
         )
         return self.STATE_MINUTE
 
@@ -288,13 +274,13 @@ class BotApp:
         await query.answer()
 
         data = query.data or ""
-        
+
         # Check if user wants to go back to hour selection
         if data == "hour:back":
             selected_date = context.user_data.get("selected_date")
             await query.edit_message_text(
                 f"📅 Дата: {selected_date:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                reply_markup=_build_hour_keyboard()
+                reply_markup=TimePickerKeyboard.build_hours()
             )
             return self.STATE_HOUR
 
@@ -345,7 +331,7 @@ class BotApp:
             location=location,
         )
         self.scheduler.schedule_meeting_reminders(meeting)
-        when_local = _ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
         summary = (
             "✅ Спасибо! Встреча создана.\n\n"
             f"📌 Название: {topic}\n"
@@ -363,6 +349,8 @@ class BotApp:
         context.user_data.clear()
         await update.effective_message.reply_text("Создание встречи отменено.")
         return ConversationHandler.END
+
+    # ========== Command Handlers ==========
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start and /help: greet user and list commands."""
@@ -383,19 +371,22 @@ class BotApp:
             "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
             "Давай делать вместе организацию встреч проще! ✨"
         )
-        await update.effective_message.reply_text(msg,
-                                                  parse_mode=ParseMode.HTML,
-                                                  disable_web_page_preview=True)
+        await update.effective_message.reply_text(
+            msg,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List all upcoming meetings with register/details buttons."""
         now_utc = datetime.utcnow().replace(tzinfo=tz.UTC)
         meetings = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
             await update.effective_message.reply_text("No upcoming meetings.")
             return
-        # Send each meeting as a separate message with a register button
+
         for m in meetings:
-            when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
+            when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             available = max(m.max_participants - confirmed, 0)
@@ -405,15 +396,14 @@ class BotApp:
                 f"Ведет: {host_name}\n"
                 f"Свободных мест: {available}"
             )
-            keyboard = InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
-                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
-                ]]
-            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
+            ]])
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List meetings the user is registered for."""
         user = update.effective_user
         if not user:
             return
@@ -422,8 +412,9 @@ class BotApp:
         if not meetings:
             await update.effective_message.reply_text("You have no meetings yet.")
             return
+
         for m in meetings:
-            when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
+            when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             available = max(m.max_participants - confirmed, 0)
@@ -433,15 +424,14 @@ class BotApp:
                 f"Ведет: {host_name}\n"
                 f"Свободных мест: {available}"
             )
-            keyboard = InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
-                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
-                ]]
-            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
+            ]])
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Register current user for a meeting by ID."""
         user = update.effective_user
         if not user:
             return
@@ -458,6 +448,7 @@ class BotApp:
         await update.effective_message.reply_text(msg)
 
     async def cmd_unregister(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Unregister current user from a meeting by ID."""
         user = update.effective_user
         if not user:
             return
@@ -472,6 +463,8 @@ class BotApp:
             return
         ok, msg = await self.db.unregister(meeting_id, user.id)
         await update.effective_message.reply_text(msg)
+
+    # ========== Callback Query Handlers ==========
 
     async def cb_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Записаться' button presses to register the user."""
@@ -506,20 +499,28 @@ class BotApp:
         except Exception:
             await cq.message.reply_text("Invalid details request.")
             return
+
         m = await self.db.get_meeting(meeting_id)
         if not m:
             await cq.message.reply_text("Meeting not found.")
             return
-        when_local = _ensure_utc(m.start_at_utc).astimezone(self.local_tz)
+
+        when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
         date_str = when_local.strftime("%A, %d %B %Y")
         time_str = when_local.strftime("%H:%M")
+
         host_user = await self.db.get_user(m.created_by)
         if host_user:
             host_display = host_user.name or (host_user.username or "Unknown")
             if host_user.username:
-                host_display = f"{host_user.name} (@{host_user.username})" if host_user.name else f"@{host_user.username}"
+                host_display = (
+                    f"{host_user.name} (@{host_user.username})"
+                    if host_user.name
+                    else f"@{host_user.username}"
+                )
         else:
             host_display = "Unknown"
+
         confirmed = await self.db.count_confirmed(m.id)
         details_text = (
             f"<b>{m.topic}</b>\n"
