@@ -379,7 +379,7 @@ class BotApp:
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List all upcoming meetings with register/details buttons."""
-        now_utc = datetime.utcnow().replace(tzinfo=tz.UTC)
+        now_utc = datetime.now(tz.UTC)
         meetings = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
             await update.effective_message.reply_text("No upcoming meetings.")
@@ -404,12 +404,13 @@ class BotApp:
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """List meetings the user is registered for."""
+        """List upcoming meetings the user is registered for."""
         user = update.effective_user
         if not user:
             return
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        meetings = await self.db.list_user_meetings(user.id)
+        now_utc = datetime.now(tz.UTC)
+        meetings = await self.db.list_user_meetings(user.id, now_utc)
         if not meetings:
             await update.effective_message.reply_text("You have no meetings yet.")
             return

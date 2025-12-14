@@ -77,7 +77,7 @@ class BotScheduler:
     async def _announcement_job(self, channel_id: int) -> None:
         """Compose and send an upcoming meetings digest to a channel."""
         # Minimal digest message
-        now_utc = datetime.utcnow().replace(tzinfo=tz.UTC)
+        now_utc = datetime.now(tz.UTC)
         meetings: Sequence[Meeting] = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
             text = "No upcoming meetings."

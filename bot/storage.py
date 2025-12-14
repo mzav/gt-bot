@@ -80,13 +80,17 @@ class Database:
             )
             return res.scalars().all()
 
-    async def list_user_meetings(self, user_id: int) -> Sequence[Meeting]:
-        """List meetings the given user is confirmed to attend (or host)."""
+    async def list_user_meetings(self, user_id: int, now_utc: datetime) -> Sequence[Meeting]:
+        """List upcoming meetings the given user is confirmed to attend (or host)."""
         async with self.session() as s:
             res = await s.execute(
                 select(Meeting)
                 .join(Registration, Registration.meeting_id == Meeting.id)
-                .where(Registration.user_id == user_id, Registration.status == RegistrationStatus.CONFIRMED)
+                .where(
+                    Registration.user_id == user_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
+                    Meeting.start_at_utc >= now_utc,
+                )
                 .order_by(Meeting.start_at_utc.asc())
             )
             return res.scalars().all()
