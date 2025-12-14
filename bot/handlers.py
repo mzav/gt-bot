@@ -389,12 +389,13 @@ class BotApp:
             when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
+            hosts = await self.db.count_hosts(m.id)
             available = max(m.max_participants - confirmed, 0)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
-                f"Свободных мест: {available}"
+                f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
@@ -417,12 +418,13 @@ class BotApp:
             when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
+            hosts = await self.db.count_hosts(m.id)
             available = max(m.max_participants - confirmed, 0)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
-                f"Свободных мест: {available}"
+                f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
@@ -522,6 +524,7 @@ class BotApp:
             host_display = "Unknown"
 
         confirmed = await self.db.count_confirmed(m.id)
+        hosts = await self.db.count_hosts(m.id)
         details_text = (
             f"<b>{m.topic}</b>\n"
             f"📝  {m.description}\n\n\n"
@@ -529,6 +532,6 @@ class BotApp:
             f"🕐 Time: {time_str} (Berlin time)\n"
             f"📍 Location {m.location or 'TBA'}\n"
             f"👤 Ведет: {host_display}\n"
-            f"👥 Идет: {confirmed} / {m.max_participants} participants"
+            f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
         await cq.message.reply_text(details_text, parse_mode="HTML")
