@@ -6,6 +6,8 @@ Modules:
 - storage: Async DB session and CRUD helpers
 - scheduler: APScheduler jobs and integration
 - handlers: Telegram command handlers and app builder
+- utils: Shared utility functions
+- keyboards: Telegram keyboard and calendar UI components
 """
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "storage",
     "scheduler",
     "handlers",
+    "utils",
+    "keyboards",
 ]

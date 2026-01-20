@@ -13,7 +13,7 @@ from dateutil import tz
 
 from .storage import Database
 from .models import Meeting
-
+from .utils import ensure_utc
 
 @dataclass
 class ReminderCallbacks:
@@ -42,11 +42,9 @@ class BotScheduler:
     def schedule_meeting_reminders(self, meeting: Meeting) -> None:
         """Schedule reminder jobs relative to the meeting start time."""
         # Schedule 3 days and 1 day before
+        start_utc = ensure_utc(meeting.start_at_utc)
         for days_before in (3, 1):
-            run_at = meeting.start_at_utc - timedelta(days=days_before)
-            # Normalize to timezone-aware UTC to avoid naive/aware comparison issues
-            if run_at.tzinfo is None:
-                run_at = run_at.replace(tzinfo=tz.UTC)
+            run_at = start_utc - timedelta(days=days_before)
             now = datetime.now(tz.UTC)
             if run_at > now:
                 self.scheduler.add_job(
@@ -86,7 +84,7 @@ class BotScheduler:
         else:
             lines = ["Upcoming meetings:"]
             for m in meetings[:10]:
-                when_local = m.start_at_utc.astimezone(self._tz)
+                when_local = ensure_utc(m.start_at_utc).astimezone(self._tz)
                 lines.append(f"#{m.id} {m.topic} — {when_local:%Y-%m-%d %H:%M} @ {m.location or 'TBA'}")
             text = "\n".join(lines)
         await self._send_channel_message(channel_id, text)
