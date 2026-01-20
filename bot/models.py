@@ -61,6 +61,7 @@ class Registration(Base):
     meeting_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     status: Mapped[str] = mapped_column(String(20), default=RegistrationStatus.CONFIRMED, index=True)
+    is_host: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     meeting: Mapped[Meeting] = relationship("Meeting", back_populates="registrations")

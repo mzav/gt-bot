@@ -2,10 +2,14 @@
 
 This module contains reusable UI components for the bot:
 - MeetingCalendar: Customized calendar widget with Russian translations
+- MonthPickerKeyboard: Custom 3-month selection keyboard
 - Time picker keyboards: Hour and minute selection interfaces
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
+
+from dateutil.relativedelta import relativedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram_bot_calendar import DetailedTelegramCalendar
 
@@ -16,6 +20,12 @@ LSTEP_TRANSLATIONS = {
     "m": "месяц", 
     "d": "день",
 }
+
+# Russian month names
+RUSSIAN_MONTHS = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+]
 
 # Time picker configuration
 HOUR_START = 6    # First selectable hour
@@ -28,12 +38,62 @@ class MeetingCalendar(DetailedTelegramCalendar):
     """Calendar widget customized for meeting date selection.
     
     Extends DetailedTelegramCalendar with custom navigation buttons
-    and cleaner empty state display.
+    and cleaner empty state display. Starts at day selection (skips year/month).
     """
+    first_step = "d"  # Start directly at day selection
     prev_button = "⬅️"
     next_button = "➡️"
     empty_month_button = ""
     empty_year_button = ""
+
+
+class MonthPickerKeyboard:
+    """Factory for month picker inline keyboard.
+    
+    Shows the next 3 months starting from tomorrow as buttons,
+    formatted as "Month Name Year".
+    """
+    
+    @staticmethod
+    def build() -> InlineKeyboardMarkup:
+        """Build an inline keyboard with the next 3 months.
+        
+        Returns:
+            InlineKeyboardMarkup with month selection buttons.
+        """
+        tomorrow = date.today() + timedelta(days=1)
+        buttons = []
+        
+        for i in range(3):
+            month_date = tomorrow + relativedelta(months=i)
+            month_name = RUSSIAN_MONTHS[month_date.month - 1]
+            label = f"{month_name} {month_date.year}"
+            callback_data = f"month:{month_date.year}:{month_date.month}"
+            buttons.append([
+                InlineKeyboardButton(text=label, callback_data=callback_data)
+            ])
+        
+        return InlineKeyboardMarkup(buttons)
+    
+    @staticmethod
+    def parse_callback(data: str) -> tuple[int, int] | None:
+        """Parse month selection callback data.
+        
+        Args:
+            data: Callback data string in format "month:YYYY:MM"
+            
+        Returns:
+            Tuple of (year, month) or None if invalid format.
+        """
+        if not data.startswith("month:"):
+            return None
+        parts = data.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            return int(parts[1]), int(parts[2])
+        except ValueError:
+            return None
 
 
 class TimePickerKeyboard:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from dateutil import tz
@@ -25,6 +25,7 @@ from .scheduler import BotScheduler
 from .utils import ensure_utc
 from .keyboards import (
     MeetingCalendar,
+    MonthPickerKeyboard,
     TimePickerKeyboard,
     LSTEP_TRANSLATIONS,
 )
@@ -71,9 +72,10 @@ class BotApp:
     STATE_DESCRIPTION = 2
     STATE_MAX = 3
     STATE_LOCATION = 4
-    STATE_DATE = 5
-    STATE_HOUR = 6
-    STATE_MINUTE = 7
+    STATE_MONTH = 5
+    STATE_DATE = 6
+    STATE_HOUR = 7
+    STATE_MINUTE = 8
 
     def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler):
         self.settings = settings
@@ -122,6 +124,9 @@ class BotApp:
                 self.STATE_LOCATION: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)
                 ],
+                self.STATE_MONTH: [
+                    CallbackQueryHandler(self._create_meeting_month_callback, pattern=r"^month:")
+                ],
                 self.STATE_DATE: [
                     CallbackQueryHandler(self._create_meeting_calendar_callback, pattern=r"^cbcal_")
                 ],
@@ -168,7 +173,7 @@ class BotApp:
             return self.STATE_DESCRIPTION
         context.user_data["description"] = desc
         await update.effective_message.reply_text(
-            "Принято! Описание получено.\nПожалуйста, укажи максимальное количество участников для этой встречи.\nПример: 20"
+            "Принято! Описание получено.\nПожалуйста, укажи максимальное количество участников для этой встречи, не включая ведущих.\nПример: 5"
         )
         return self.STATE_MAX
 
@@ -195,11 +200,49 @@ class BotApp:
         location = None if raw.lower() in skip_values else raw
         context.user_data["location"] = location
         received = "не указано" if not location else f"{location}"
-        # Show calendar for date selection
-        calendar, step = MeetingCalendar(calendar_id=1, min_date=date.today()).build()
+        # Show month picker for date selection
         await update.effective_message.reply_text(
             f"Принято! Место проведения: {received}.\n\n"
-            f"📅 Выбери дату встречи (выбери {LSTEP_TRANSLATIONS[step]}):",
+            f"📅 Выбери месяц встречи:",
+            reply_markup=MonthPickerKeyboard.build()
+        )
+        return self.STATE_MONTH
+
+    async def _create_meeting_month_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle month button presses for month selection."""
+        query = update.callback_query
+        if not query:
+            return self.STATE_MONTH
+        await query.answer()
+
+        parsed = MonthPickerKeyboard.parse_callback(query.data)
+        if not parsed:
+            return self.STATE_MONTH
+
+        year, month = parsed
+        context.user_data["selected_year"] = year
+        context.user_data["selected_month"] = month
+
+        # Calculate min and max dates for the calendar (only selected month)
+        tomorrow = date.today() + timedelta(days=1)
+        first_of_month = date(year, month, 1)
+        # min_date: first of selected month, but not before tomorrow
+        min_date_val = max(first_of_month, tomorrow)
+        # max_date: last day of selected month
+        if month == 12:
+            max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            max_date_val = date(year, month + 1, 1) - timedelta(days=1)
+
+        # Show day calendar for the selected month
+        calendar, step = MeetingCalendar(
+            calendar_id=1,
+            current_date=min_date_val,
+            min_date=min_date_val,
+            max_date=max_date_val
+        ).build()
+        await query.edit_message_text(
+            f"📅 Выбери день встречи:",
             reply_markup=calendar
         )
         return self.STATE_DATE
@@ -211,12 +254,27 @@ class BotApp:
             return self.STATE_DATE
         await query.answer()
 
-        result, key, step = MeetingCalendar(calendar_id=1, min_date=date.today()).process(query.data)
+        # Reconstruct date constraints for the selected month
+        year = context.user_data.get("selected_year")
+        month = context.user_data.get("selected_month")
+        tomorrow = date.today() + timedelta(days=1)
+        first_of_month = date(year, month, 1)
+        min_date_val = max(first_of_month, tomorrow)
+        if month == 12:
+            max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            max_date_val = date(year, month + 1, 1) - timedelta(days=1)
+
+        result, key, step = MeetingCalendar(
+            calendar_id=1,
+            min_date=min_date_val,
+            max_date=max_date_val
+        ).process(query.data)
 
         if not result and key:
             # User is still navigating the calendar
             await query.edit_message_text(
-                f"📅 Выбери дату встречи (выбери {LSTEP_TRANSLATIONS[step]}):",
+                f"📅 Выбери день встречи:",
                 reply_markup=key
             )
             return self.STATE_DATE
@@ -379,7 +437,7 @@ class BotApp:
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List all upcoming meetings with register/details buttons."""
-        now_utc = datetime.utcnow().replace(tzinfo=tz.UTC)
+        now_utc = datetime.now(tz.UTC)
         meetings = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
             await update.effective_message.reply_text("No upcoming meetings.")
@@ -389,12 +447,13 @@ class BotApp:
             when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
+            hosts = await self.db.count_hosts(m.id)
             available = max(m.max_participants - confirmed, 0)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
-                f"Свободных мест: {available}"
+                f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
@@ -403,12 +462,13 @@ class BotApp:
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """List meetings the user is registered for."""
+        """List upcoming meetings the user is registered for."""
         user = update.effective_user
         if not user:
             return
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        meetings = await self.db.list_user_meetings(user.id)
+        now_utc = datetime.now(tz.UTC)
+        meetings = await self.db.list_user_meetings(user.id, now_utc)
         if not meetings:
             await update.effective_message.reply_text("You have no meetings yet.")
             return
@@ -417,12 +477,13 @@ class BotApp:
             when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
+            hosts = await self.db.count_hosts(m.id)
             available = max(m.max_participants - confirmed, 0)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
-                f"Свободных мест: {available}"
+                f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
@@ -522,6 +583,7 @@ class BotApp:
             host_display = "Unknown"
 
         confirmed = await self.db.count_confirmed(m.id)
+        hosts = await self.db.count_hosts(m.id)
         details_text = (
             f"<b>{m.topic}</b>\n"
             f"📝  {m.description}\n\n\n"
@@ -529,6 +591,6 @@ class BotApp:
             f"🕐 Time: {time_str} (Berlin time)\n"
             f"📍 Location {m.location or 'TBA'}\n"
             f"👤 Ведет: {host_display}\n"
-            f"👥 Идет: {confirmed} / {m.max_participants} participants"
+            f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
         await cq.message.reply_text(details_text, parse_mode="HTML")

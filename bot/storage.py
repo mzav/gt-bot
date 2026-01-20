@@ -48,7 +48,7 @@ class Database:
     # Meetings
     async def create_meeting(self, *, host_id: int, topic: str, description: str, start_at_utc: datetime,
                               max_participants: int, location: str | None) -> Meeting:
-        """Create a new meeting and auto-register the host as confirmed."""
+        """Create a new meeting and register the host (is_host=True, doesn't count against max)."""
         async with self.session() as s:
             m = Meeting(
                 topic=topic,
@@ -60,8 +60,8 @@ class Database:
             )
             s.add(m)
             await s.flush()
-            # Auto-register host as confirmed
-            reg = Registration(meeting_id=m.id, user_id=host_id, status=RegistrationStatus.CONFIRMED)
+            # Auto-register host as confirmed (is_host=True, excluded from participant count)
+            reg = Registration(meeting_id=m.id, user_id=host_id, status=RegistrationStatus.CONFIRMED, is_host=True)
             s.add(reg)
             await s.commit()
             await s.refresh(m)
@@ -80,24 +80,41 @@ class Database:
             )
             return res.scalars().all()
 
-    async def list_user_meetings(self, user_id: int) -> Sequence[Meeting]:
-        """List meetings the given user is confirmed to attend (or host)."""
+    async def list_user_meetings(self, user_id: int, now_utc: datetime) -> Sequence[Meeting]:
+        """List upcoming meetings the given user is confirmed to attend (or host)."""
         async with self.session() as s:
             res = await s.execute(
                 select(Meeting)
                 .join(Registration, Registration.meeting_id == Meeting.id)
-                .where(Registration.user_id == user_id, Registration.status == RegistrationStatus.CONFIRMED)
+                .where(
+                    Registration.user_id == user_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
+                    Meeting.start_at_utc >= now_utc,
+                )
                 .order_by(Meeting.start_at_utc.asc())
             )
             return res.scalars().all()
 
     async def count_confirmed(self, meeting_id: int) -> int:
-        """Return the number of confirmed registrations for the meeting."""
+        """Return the number of confirmed participants (excluding hosts)."""
         async with self.session() as s:
             res = await s.execute(
                 select(func.count()).select_from(Registration).where(
                     Registration.meeting_id == meeting_id,
                     Registration.status == RegistrationStatus.CONFIRMED,
+                    Registration.is_host == False,
+                )
+            )
+            return int(res.scalar_one())
+
+    async def count_hosts(self, meeting_id: int) -> int:
+        """Return the number of confirmed hosts for the meeting."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(func.count()).select_from(Registration).where(
+                    Registration.meeting_id == meeting_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
+                    Registration.is_host == True,
                 )
             )
             return int(res.scalar_one())
