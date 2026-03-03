@@ -193,3 +193,48 @@ class Database:
                 select(Registration).where(Registration.meeting_id == meeting_id, Registration.status == RegistrationStatus.CONFIRMED)
             )
             return res.scalars().all()
+
+    async def cancel_meeting(self, meeting_id: int, canceled_at: datetime) -> Meeting | None:
+        """Mark a meeting as canceled by setting canceled_at timestamp.
+
+        Returns the updated Meeting or None if not found.
+        """
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None:
+                return None
+            m.canceled_at = canceled_at
+            await s.commit()
+            await s.refresh(m)
+            return m
+
+    async def update_meeting(
+        self,
+        meeting_id: int,
+        topic: str | None = None,
+        description: str | None = None,
+        start_at_utc: datetime | None = None,
+        max_participants: int | None = None,
+        location: str | None = None,
+    ) -> Meeting | None:
+        """Update meeting fields. Only non-None values are updated.
+
+        Returns the updated Meeting or None if not found.
+        """
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None:
+                return None
+            if topic is not None:
+                m.topic = topic
+            if description is not None:
+                m.description = description
+            if start_at_utc is not None:
+                m.start_at_utc = start_at_utc
+            if max_participants is not None:
+                m.max_participants = max_participants
+            if location is not None:
+                m.location = location
+            await s.commit()
+            await s.refresh(m)
+            return m
