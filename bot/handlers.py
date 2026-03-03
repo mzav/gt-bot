@@ -95,6 +95,8 @@ class BotApp:
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_details, pattern=r"^details:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_edit_meeting, pattern=r"^edit:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_cancel_meeting, pattern=r"^cancel:\d+$"))
 
         # Lifecycle hooks to start/stop scheduler
         async def on_start(_: Application) -> None:
@@ -437,6 +439,7 @@ class BotApp:
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List all upcoming meetings with register/details buttons."""
+        user = update.effective_user
         now_utc = datetime.now(tz.UTC)
         meetings = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
@@ -455,10 +458,17 @@ class BotApp:
                 f"Ведет: {host_name}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
-                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
-            ]])
+            if user and m.created_by == user.id:
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}"),
+                    InlineKeyboardButton(text="Изменить", callback_data=f"edit:{m.id}"),
+                    InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{m.id}")
+                ]])
+            else:
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
+                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
+                ]])
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -486,8 +496,9 @@ class BotApp:
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
-                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}"),
+                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{m.id}"),
+                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{m.id}")
             ]])
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -594,3 +605,35 @@ class BotApp:
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
         await cq.message.reply_text(details_text, parse_mode="HTML")
+
+    async def cb_edit_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline 'Изменить' button presses to edit a meeting (placeholder)."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Invalid edit request.")
+            return
+        # TODO: Implement meeting edit functionality
+        await cq.message.reply_text(f"Редактирование встречи #{meeting_id} пока не реализовано.")
+
+    async def cb_cancel_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline 'Отменить' button presses to cancel a meeting (placeholder)."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Invalid cancel request.")
+            return
+        # TODO: Implement meeting cancellation functionality
+        await cq.message.reply_text(f"Отмена встречи #{meeting_id} пока не реализована.")
