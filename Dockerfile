@@ -19,16 +19,11 @@ COPY --from=builder /install /usr/local
 # Copy application source
 COPY . .
 
-# Non-root user for least-privilege execution
-RUN useradd --no-create-home --shell /bin/false botuser \
-    && mkdir -p /data \
-    && chown botuser:botuser /data
-
-USER botuser
+RUN mkdir -p /data
 
 # /data is the Railway persistent volume mount point.
 # Litestream replicates /data/gtbot.db to B2 in the background,
 # then the bot process starts in the foreground.
-CMD litestream replicate -config /app/litestream.yml & \
-    sleep 2 && \
-    python main.py
+# CMD litestream replicate -config /app/litestream.yml & \
+#     sleep 2 && \
+#     python main.py
