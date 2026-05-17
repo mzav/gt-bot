@@ -34,7 +34,7 @@ class Settings(BaseModel):
     list of supported variables.
     """
     telegram_bot_token: str
-    database_url: str = "sqlite+aiosqlite:///./gtbot.db"
+    database_url: str = "sqlite+aiosqlite:////data/gtbot.db"
     tz: str = "Europe/Berlin"
 
     announcements_channel_id: int | None = None
