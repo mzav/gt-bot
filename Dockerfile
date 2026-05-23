@@ -21,11 +21,11 @@ COPY . .
 
 RUN mkdir -p /data
 
-CMD python main.py
-
 # /data is the Railway persistent volume mount point.
 # Litestream replicates /data/gtbot.db to B2 in the background,
 # then the bot process starts in the foreground.
 # CMD litestream replicate -config /app/litestream.yml & \
 #     sleep 2 && \
 #     python main.py
+
+CMD python main.py
