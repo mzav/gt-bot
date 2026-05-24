@@ -168,7 +168,6 @@ class BotApp:
                     CallbackQueryHandler(self._edit_select_max, pattern=r"^edit_field:max$"),
                     CallbackQueryHandler(self._edit_select_location, pattern=r"^edit_field:location$"),
                     CallbackQueryHandler(self._edit_select_datetime, pattern=r"^edit_field:datetime$"),
-                    CallbackQueryHandler(self._edit_back_to_menu, pattern=r"^edit_field:back$"),
                     CallbackQueryHandler(self._edit_done, pattern=r"^edit_field:done$"),
                 ],
                 self.STATE_EDIT_TOPIC: [
@@ -204,6 +203,33 @@ class BotApp:
             allow_reentry=True,
             per_message=False,
         )
+
+    def _build_meeting_actions_keyboard(
+        self,
+        meeting_id: int,
+        user_id: int | None,
+        created_by: int,
+        *,
+        include_register: bool = False,
+    ) -> InlineKeyboardMarkup:
+        """Build action buttons for a meeting list entry."""
+        is_host = user_id is not None and created_by == user_id
+        if is_host:
+            buttons = [
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
+                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
+            ]
+        elif include_register:
+            buttons = [
+                InlineKeyboardButton(text="Записаться", callback_data=f"register:{meeting_id}"),
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+            ]
+        else:
+            buttons = [
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+            ]
+        return InlineKeyboardMarkup([buttons])
 
     def _build_edit_menu_keyboard(self) -> InlineKeyboardMarkup:
         """Build the inline keyboard for selecting which field to edit."""
@@ -254,6 +280,10 @@ class BotApp:
             await cq.message.reply_text("Только автор встречи может её редактировать.")
             return ConversationHandler.END
 
+        if meeting.canceled_at:
+            await cq.message.reply_text("Эта встреча уже отменена.")
+            return ConversationHandler.END
+
         context.user_data["edit_meeting_id"] = meeting_id
         when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
 
@@ -267,40 +297,6 @@ class BotApp:
             "Выбери, что хочешь изменить:"
         )
         await cq.message.reply_text(
-            text,
-            reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
-        )
-        return self.STATE_EDIT_MENU
-
-    async def _edit_back_to_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Return to the edit menu."""
-        cq = update.callback_query
-        if not cq:
-            return self.STATE_EDIT_MENU
-        await cq.answer()
-
-        meeting_id = context.user_data.get("edit_meeting_id")
-        if not meeting_id:
-            await cq.message.reply_text("Сессия редактирования истекла. Начни заново.")
-            return ConversationHandler.END
-
-        meeting = await self.db.get_meeting(meeting_id)
-        if not meeting:
-            await cq.message.reply_text("Встреча не найдена.")
-            return ConversationHandler.END
-
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
-        await cq.edit_message_text(
             text,
             reply_markup=self._build_edit_menu_keyboard(),
             parse_mode="HTML"
@@ -531,9 +527,10 @@ class BotApp:
             return ConversationHandler.END
 
         skip_values = {"-", "—", "пропустить", "нет", "убрать"}
-        location = None if raw.lower() in skip_values else raw
-
-        meeting = await self.db.update_meeting(meeting_id, location=location)
+        if raw.lower() in skip_values:
+            meeting = await self.db.update_meeting(meeting_id, clear_location=True)
+        else:
+            meeting = await self.db.update_meeting(meeting_id, location=raw)
         if not meeting:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
@@ -1049,17 +1046,9 @@ class BotApp:
                 f"Ведет: {host_name}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
-            if user and m.created_by == user.id:
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}"),
-                    InlineKeyboardButton(text="Изменить", callback_data=f"edit:{m.id}"),
-                    InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{m.id}")
-                ]])
-            else:
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(text="Записаться", callback_data=f"register:{m.id}"),
-                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}")
-                ]])
+            keyboard = self._build_meeting_actions_keyboard(
+                m.id, user.id if user else None, m.created_by, include_register=True
+            )
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1086,11 +1075,7 @@ class BotApp:
                 f"Ведет: {host_name}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(text="Подробности", callback_data=f"details:{m.id}"),
-                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{m.id}"),
-                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{m.id}")
-            ]])
+            keyboard = self._build_meeting_actions_keyboard(m.id, user.id, m.created_by)
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

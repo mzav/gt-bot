@@ -106,6 +106,7 @@ class Database:
                 .where(
                     Registration.user_id == user_id,
                     Registration.status == RegistrationStatus.CONFIRMED,
+                    Meeting.canceled_at.is_(None),
                     Meeting.start_at_utc >= now_utc,
                 )
                 .order_by(Meeting.start_at_utc.asc())
@@ -233,8 +234,10 @@ class Database:
         start_at_utc: datetime | None = None,
         max_participants: int | None = None,
         location: str | None = None,
+        *,
+        clear_location: bool = False,
     ) -> Meeting | None:
-        """Update meeting fields. Only non-None values are updated.
+        """Update meeting fields. Only provided values are updated.
 
         Returns the updated Meeting or None if not found.
         """
@@ -250,7 +253,9 @@ class Database:
                 m.start_at_utc = start_at_utc
             if max_participants is not None:
                 m.max_participants = max_participants
-            if location is not None:
+            if clear_location:
+                m.location = None
+            elif location is not None:
                 m.location = location
             await s.commit()
             await s.refresh(m)
