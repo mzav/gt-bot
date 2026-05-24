@@ -5,8 +5,10 @@ Exposes a thin CRUD wrapper around the models for use by handlers/scheduler.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -14,10 +16,25 @@ from sqlalchemy import select, func, update
 
 from .models import Base, User, Meeting, Registration, RegistrationStatus
 
+log = logging.getLogger(__name__)
+
+
+def _ensure_db_dir(url: str) -> None:
+    """Create the parent directory for a SQLite URL if it doesn't exist."""
+    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+        if url.startswith(prefix):
+            path_part = url[len(prefix):]
+            # 4-slash absolute path starts with "/" after stripping prefix
+            db_path = Path(path_part if path_part.startswith("/") else path_part)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            log.info("Database path: %s", db_path)
+            return
+
 
 class Database:
     """Simple async database facade for sessions and CRUD helpers."""
     def __init__(self, url: str):
+        _ensure_db_dir(url)
         self.engine = create_async_engine(url, future=True, echo=False)
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=self.engine, expire_on_commit=False

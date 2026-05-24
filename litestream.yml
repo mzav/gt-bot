@@ -1,0 +1,10 @@
+dbs:
+  - path: /data/gtbot.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: gtbot
+        endpoint: ${LITESTREAM_ENDPOINT}
+        access-key-id: ${LITESTREAM_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET}
+        sync-interval: 60s
