@@ -215,10 +215,11 @@ class BotApp:
         *,
         include_register: bool = False,
         is_participant: bool = False,
+        available: int = 1,
     ) -> InlineKeyboardMarkup:
         """Build action buttons for a meeting list entry."""
         is_host = user_id is not None and created_by == user_id
-        can_register = include_register and not is_host and not is_participant
+        can_register = include_register and not is_host and not is_participant and available > 0
         if is_host:
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
@@ -1060,7 +1061,7 @@ class BotApp:
             )
             keyboard = self._build_meeting_actions_keyboard(
                 m.id, user.id if user else None, m.created_by,
-                include_register=True, is_participant=is_participant,
+                include_register=True, is_participant=is_participant, available=available,
             )
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
