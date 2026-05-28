@@ -20,5 +20,5 @@ COPY . .
 # so replication runs continuously in the background.
 RUN mkdir -p /data
 
-CMD litestream restore -if-replica-exists -config /app/litestream.yml /data/gtbot.db \
- && litestream replicate -config /app/litestream.yml -exec "python main.py"
+CMD [ -f /data/gtbot.db ] || litestream restore -if-replica-exists -config /app/litestream.yml /data/gtbot.db ; \
+    litestream replicate -config /app/litestream.yml -exec "python main.py"
