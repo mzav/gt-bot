@@ -7,4 +7,4 @@ dbs:
         endpoint: ${LITESTREAM_ENDPOINT}
         access-key-id: ${LITESTREAM_KEY_ID}
         secret-access-key: ${LITESTREAM_SECRET}
-        sync-interval: 60s
+        sync-interval: 1h

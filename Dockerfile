@@ -16,8 +16,9 @@ COPY --from=builder /install /usr/local
 COPY . .
 
 # /data is mounted as a Railway persistent volume at runtime.
-# Litestream replicates /data/gtbot.db to B2 in the background,
-# then the bot starts in the foreground.
-CMD litestream replicate -config /app/litestream.yml & \
-    sleep 2 && \
-    python main.py
+# Restore from B2 replica if one exists, then start the bot under litestream
+# so replication runs continuously in the background.
+RUN mkdir -p /data
+
+CMD litestream restore -if-replica-exists -config /app/litestream.yml /data/gtbot.db \
+ && litestream replicate -config /app/litestream.yml -exec "python main.py"
