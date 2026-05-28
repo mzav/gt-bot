@@ -110,6 +110,9 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_cancel_meeting, pattern=r"^cancel:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_cancel_confirm, pattern=r"^cancel_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_cancel_abort, pattern=r"^cancel_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_meeting, pattern=r"^leave:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_abort, pattern=r"^leave_abort:\d+$"))
 
         # Lifecycle hooks to start/stop scheduler
         async def on_start(_: Application) -> None:
@@ -224,8 +227,13 @@ class BotApp:
             ]
         elif can_register:
             buttons = [
-                InlineKeyboardButton(text="Записаться", callback_data=f"register:{meeting_id}"),
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                InlineKeyboardButton(text="Записаться", callback_data=f"register:{meeting_id}"),
+            ]
+        elif is_participant:
+            buttons = [
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                InlineKeyboardButton(text="Отменить участие", callback_data=f"leave:{meeting_id}"),
             ]
         else:
             buttons = [
@@ -1081,7 +1089,7 @@ class BotApp:
                 f"📍 {m.location or 'TBA'}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
-            keyboard = self._build_meeting_actions_keyboard(m.id, user.id, m.created_by)
+            keyboard = self._build_meeting_actions_keyboard(m.id, user.id, m.created_by, is_participant=True)
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1302,3 +1310,95 @@ class BotApp:
             return
 
         await cq.edit_message_text(f"Отмена встречи #{meeting_id} отклонена. Встреча остаётся активной.")
+
+    async def cb_leave_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle 'Отменить участие' button - show confirmation prompt."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        user = update.effective_user
+        if not user:
+            return
+
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Ошибка: неверный запрос.")
+            return
+
+        meeting = await self.db.get_meeting(meeting_id)
+        if not meeting:
+            await cq.message.reply_text("Встреча не найдена.")
+            return
+
+        if not await self.db.is_registered(meeting_id, user.id):
+            await cq.message.reply_text("Ты не зарегистрирован(а) на эту встречу.")
+            return
+
+        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        confirmation_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(text="✅ Да, отменить участие", callback_data=f"leave_confirm:{meeting_id}"),
+                InlineKeyboardButton(text="❌ Нет, остаться", callback_data=f"leave_abort:{meeting_id}"),
+            ]
+        ])
+        text = (
+            f"⚠️ <b>Отмена участия в встрече #{meeting_id}</b>\n\n"
+            f"📌 {meeting.topic}\n"
+            f"📅 {when_local:%d.%m.%Y %H:%M}\n\n"
+            "Ты уверен(а), что хочешь отменить своё участие?"
+        )
+        await cq.message.reply_text(text, reply_markup=confirmation_keyboard, parse_mode="HTML")
+
+    async def cb_leave_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle confirmed participation cancellation."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        user = update.effective_user
+        if not user:
+            return
+
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Ошибка: неверный запрос.")
+            return
+
+        ok, msg = await self.db.unregister(meeting_id, user.id)
+        if ok:
+            meeting = await self.db.get_meeting(meeting_id)
+            when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz) if meeting else None
+            text = (
+                f"✅ Твоё участие в встрече #{meeting_id}"
+                + (f" «{meeting.topic}» ({when_local:%d.%m.%Y %H:%M})" if meeting and when_local else "")
+                + " отменено."
+            )
+            await cq.edit_message_text(text, parse_mode="HTML")
+        else:
+            await cq.edit_message_text(f"Не удалось отменить участие: {msg}")
+
+    async def cb_leave_abort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle abort of participation cancellation."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Ошибка: неверный запрос.")
+            return
+
+        await cq.edit_message_text(f"Отмена участия во встрече #{meeting_id} отклонена. Ты остаёшься участником.")
