@@ -184,6 +184,18 @@ class Database:
                 return True, "Meeting is full. You are added to the waitlist."
             return True, "Registered successfully."
 
+    async def is_registered(self, meeting_id: int, user_id: int) -> bool:
+        """Check if user has an active (confirmed or waitlisted) registration."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(Registration).where(
+                    Registration.meeting_id == meeting_id,
+                    Registration.user_id == user_id,
+                    Registration.status.in_([RegistrationStatus.CONFIRMED, RegistrationStatus.WAITLISTED]),
+                )
+            )
+            return res.scalar_one_or_none() is not None
+
     async def unregister(self, meeting_id: int, user_id: int) -> tuple[bool, str]:
         """Cancel a user's registration for a meeting.
 

@@ -211,16 +211,18 @@ class BotApp:
         created_by: int,
         *,
         include_register: bool = False,
+        is_participant: bool = False,
     ) -> InlineKeyboardMarkup:
         """Build action buttons for a meeting list entry."""
         is_host = user_id is not None and created_by == user_id
+        can_register = include_register and not is_host and not is_participant
         if is_host:
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
                 InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
                 InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
             ]
-        elif include_register:
+        elif can_register:
             buttons = [
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{meeting_id}"),
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
@@ -1015,7 +1017,7 @@ class BotApp:
             "📅 /upcoming_meetings — все события\n"
             "📗 /my_meetings — мои встречи\n"
             "❓ /help — показать помощь\n\n"
-            "👉 Не забудь вступить в <a href='https://t.me/+AI-HCuAXy204NWQy'>канал с анонсами</a> 👈\n\n"
+            "👉 Не забудь вступить в <a href='https://t.me/+8D9imfRpZDAxMDdi'>канал с анонсами</a> 👈\n\n"
             "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
             "Давай делать вместе организацию встреч проще! ✨"
         )
@@ -1040,14 +1042,17 @@ class BotApp:
             confirmed = await self.db.count_confirmed(m.id)
             hosts = await self.db.count_hosts(m.id)
             available = max(m.max_participants - confirmed, 0)
+            is_participant = user is not None and await self.db.is_registered(m.id, user.id)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
+                f"📍 {m.location or 'TBA'}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = self._build_meeting_actions_keyboard(
-                m.id, user.id if user else None, m.created_by, include_register=True
+                m.id, user.id if user else None, m.created_by,
+                include_register=True, is_participant=is_participant,
             )
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1073,6 +1078,7 @@ class BotApp:
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
+                f"📍 {m.location or 'TBA'}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
             keyboard = self._build_meeting_actions_keyboard(m.id, user.id, m.created_by)
