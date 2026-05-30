@@ -89,6 +89,20 @@ class Database:
         async with self.session() as s:
             return await s.get(Meeting, meeting_id)
 
+    async def list_meetings_in_range(self, from_utc: datetime, to_utc: datetime) -> Sequence[Meeting]:
+        """List non-canceled meetings whose start time falls within [from_utc, to_utc]."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(Meeting)
+                .where(
+                    Meeting.canceled_at.is_(None),
+                    Meeting.start_at_utc >= from_utc,
+                    Meeting.start_at_utc <= to_utc,
+                )
+                .order_by(Meeting.start_at_utc.asc())
+            )
+            return res.scalars().all()
+
     async def list_upcoming_meetings(self, now_utc: datetime) -> Sequence[Meeting]:
         """List meetings starting at/after the given UTC datetime."""
         async with self.session() as s:
