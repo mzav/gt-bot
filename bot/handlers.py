@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, date, timedelta
-from typing import Optional
 
 from dateutil import tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,37 +30,6 @@ from .keyboards import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _format_meeting_line(m, local_tz) -> str:
-    """Format a one-line summary of a meeting in the given local timezone."""
-    when_local = ensure_utc(m.start_at_utc).astimezone(local_tz)
-    return f"#{m.id} — {m.topic} — {when_local:%Y-%m-%d %H:%M} — {m.location or 'TBA'}"
-
-
-def _parse_new_args(arg: str) -> Optional[dict]:
-    """Parse /create_meeting command arguments separated by pipes.
-
-    Expected format: "topic | description | YYYY-MM-DD HH:MM | max | location(optional)".
-    Returns a dict on success or None if parsing fails.
-    """
-    # Expected: topic | description | YYYY-MM-DD HH:MM | max | location(optional)
-    parts = [p.strip() for p in arg.split("|")]
-    if len(parts) < 4:
-        return None
-    topic, description, dt_str, max_str = parts[:4]
-    location = parts[4] if len(parts) > 4 else None
-    try:
-        max_p = int(max_str)
-    except Exception:
-        return None
-    return {
-        "topic": topic,
-        "description": description,
-        "dt_str": dt_str,
-        "max_participants": max_p,
-        "location": location,
-    }
 
 
 class BotApp:
@@ -723,8 +691,6 @@ class BotApp:
             await query.edit_message_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        self.scheduler.schedule_meeting_reminders(meeting)
-
         when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
         text = (
             f"✅ Дата и время обновлены!\n\n"
@@ -989,7 +955,7 @@ class BotApp:
             max_participants=max_participants,
             location=location,
         )
-        self.scheduler.schedule_meeting_reminders(meeting)
+        await self.scheduler.maybe_announce_new_meeting(meeting)
         when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
         summary = (
             "✅ Спасибо! Встреча создана.\n\n"

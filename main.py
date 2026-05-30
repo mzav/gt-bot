@@ -39,7 +39,7 @@ async def main_async() -> None:
     application = bot_app.build()
 
     async def send_channel_message(channel_id: int, text: str) -> None:
-        await application.bot.send_message(chat_id=channel_id, text=text)
+        await application.bot.send_message(chat_id=channel_id, text=text, parse_mode="HTML")
 
     # Scheduler
     scheduler = BotScheduler(db=db, timezone=settings.tzinfo(), send_channel_message=send_channel_message)
@@ -49,6 +49,7 @@ async def main_async() -> None:
     # Announcements schedule
     announce_conf = settings.announce_config()
     scheduler.schedule_announcements(announce_conf.days, announce_conf.time_of_day, settings.announcements_channel_id)
+    scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
 
     # Explicit Application lifecycle to ensure an event loop exists (Python 3.12)
     await application.initialize()

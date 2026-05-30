@@ -38,11 +38,10 @@ class Settings(BaseModel):
     tz: str = "Europe/Berlin"
 
     announcements_channel_id: int | None = None
-    admin_user_ids: List[int] = Field(default_factory=list)
-    bot_owner_id: int | None = None
 
     announce_days: List[int] = Field(default_factory=lambda: [1, 15])
     announce_time: str = "10:00"
+    daily_check_time: str = "09:00"
 
     log_level: str = "INFO"
 
@@ -50,30 +49,27 @@ class Settings(BaseModel):
         """Return ZoneInfo instance for the configured time zone."""
         return zoneinfo.ZoneInfo(self.tz)
 
-    def announce_config(self) -> AnnounceConfig:
-        """Build an AnnounceConfig from the flat settings values.
-
-        Returns:
-            AnnounceConfig: Validated config with parsed time and filtered days.
-        """
-        # Parse HH:MM
-        hh, mm = (self.announce_time.split(":") + ["0"])[:2]
+    @staticmethod
+    def parse_time(value: str, default: time) -> time:
+        """Parse an HH:MM string, returning default on failure."""
         try:
-            t = time(int(hh), int(mm))
+            hh, mm = (value.split(":") + ["0"])[:2]
+            return time(int(hh), int(mm))
         except Exception:
-            t = time(10, 0)
-        # Validate days (1..31)
-        days: List[int] = []
-        for part in self.announce_days:
-            try:
-                d = int(part)
-                if 1 <= d <= 31:
-                    days.append(d)
-            except Exception:
-                continue
-        if not days:
-            days = [1, 15]
-        return AnnounceConfig(days=days, time_of_day=t)
+            return default
+
+    def announce_config(self) -> AnnounceConfig:
+        """Build an AnnounceConfig from the flat settings values."""
+        t = self.parse_time(self.announce_time, time(10, 0))
+        days: List[int] = [
+            d for part in self.announce_days
+            if (d := int(part)) and 1 <= d <= 31
+        ]
+        return AnnounceConfig(days=days or [1, 15], time_of_day=t)
+
+    def daily_check_time_parsed(self) -> time:
+        """Return the parsed daily check time, defaulting to 09:00."""
+        return self.parse_time(self.daily_check_time, time(9, 0))
 
 
 def load_settings() -> Settings:
@@ -93,13 +89,10 @@ def load_settings() -> Settings:
     tz_name = os.getenv("TIMEZONE", "Europe/Berlin")
     channel_id = os.getenv("ANNOUNCEMENTS_CHANNEL_ID")
     channel_id_int = int(channel_id) if channel_id and channel_id.strip() else None
-    # admin_ids_env = os.getenv("ADMIN_USER_IDS", "")
-    # admin_ids = [int(x) for x in admin_ids_env.split(",") if x.strip().isdigit()]
-    # owner_id_env = os.getenv("BOT_OWNER_ID")
-    # owner_id = int(owner_id_env) if owner_id_env and owner_id_env.strip().isdigit() else None
     announce_days_env = os.getenv("ANNOUNCE_DAYS", "1,15")
     announce_days = [int(x) for x in announce_days_env.split(",") if x.strip().isdigit()]
     announce_time = os.getenv("ANNOUNCE_TIME", "10:00")
+    daily_check_time = os.getenv("DAILY_CHECK_TIME", "09:00")
     log_level = os.getenv("LOG_LEVEL", "INFO")
 
     return Settings(
@@ -107,9 +100,8 @@ def load_settings() -> Settings:
         database_url=db_url,
         tz=tz_name,
         announcements_channel_id=channel_id_int,
-        # admin_user_ids=admin_ids,
-        # bot_owner_id=owner_id,
         announce_days=announce_days,
         announce_time=announce_time,
+        daily_check_time=daily_check_time,
         log_level=log_level,
     )
