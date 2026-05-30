@@ -41,6 +41,7 @@ class Meeting(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     canceled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     host: Mapped[User] = relationship("User", back_populates="hosted_meetings")
     registrations: Mapped[list[Registration]] = relationship("Registration", back_populates="meeting", cascade="all, delete-orphan")
