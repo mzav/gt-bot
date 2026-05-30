@@ -19,6 +19,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from .config import Settings
+from .models import Meeting
 from .storage import Database
 from .scheduler import BotScheduler
 from .utils import ensure_utc
@@ -27,7 +28,23 @@ from .keyboards import (
     MonthPickerKeyboard,
     TimePickerKeyboard,
     LSTEP_TRANSLATIONS,
+    photo_skip_keyboard,
+    edit_photo_keyboard,
 )
+
+_CAPTION_LIMIT = 1024
+
+
+async def _reply_with_card(message, text: str, photo_file_id: str | None) -> None:
+    """Reply with photo+caption when available, falling back to text-only."""
+    if photo_file_id:
+        if len(text) <= _CAPTION_LIMIT:
+            await message.reply_photo(photo_file_id, caption=text, parse_mode="HTML")
+        else:
+            await message.reply_photo(photo_file_id)
+            await message.reply_text(text, parse_mode="HTML")
+    else:
+        await message.reply_text(text, parse_mode="HTML")
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +61,7 @@ class BotApp:
     STATE_DATE = 6
     STATE_HOUR = 7
     STATE_MINUTE = 8
+    STATE_PHOTO = 9
 
     # Conversation states for the edit_meeting flow
     STATE_EDIT_MENU = 10
@@ -55,6 +73,7 @@ class BotApp:
     STATE_EDIT_DATE = 16
     STATE_EDIT_HOUR = 17
     STATE_EDIT_MINUTE = 18
+    STATE_EDIT_PHOTO = 19
 
     def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler):
         self.settings = settings
@@ -123,6 +142,11 @@ class BotApp:
                     CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
                     CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
                 ],
+                self.STATE_PHOTO: [
+                    MessageHandler(filters.PHOTO, self._create_meeting_photo),
+                    CallbackQueryHandler(self._create_meeting_photo, pattern=r"^skip_photo$"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_photo_invalid),
+                ],
             },
             fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
             allow_reentry=True,
@@ -139,6 +163,7 @@ class BotApp:
                     CallbackQueryHandler(self._edit_select_max, pattern=r"^edit_field:max$"),
                     CallbackQueryHandler(self._edit_select_location, pattern=r"^edit_field:location$"),
                     CallbackQueryHandler(self._edit_select_datetime, pattern=r"^edit_field:datetime$"),
+                    CallbackQueryHandler(self._edit_select_photo, pattern=r"^edit_field:photo$"),
                     CallbackQueryHandler(self._edit_done, pattern=r"^edit_field:done$"),
                 ],
                 self.STATE_EDIT_TOPIC: [
@@ -165,6 +190,11 @@ class BotApp:
                 self.STATE_EDIT_MINUTE: [
                     CallbackQueryHandler(self._edit_minute_callback, pattern=r"^time:"),
                     CallbackQueryHandler(self._edit_minute_callback, pattern=r"^hour:back$"),
+                ],
+                self.STATE_EDIT_PHOTO: [
+                    MessageHandler(filters.PHOTO, self._edit_photo_handler),
+                    CallbackQueryHandler(self._edit_photo_handler, pattern=r"^edit_photo:"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_photo_invalid),
                 ],
             },
             fallbacks=[
@@ -225,9 +255,29 @@ class BotApp:
                 InlineKeyboardButton(text="Место", callback_data="edit_field:location"),
             ],
             [
+                InlineKeyboardButton(text="Фото", callback_data="edit_field:photo"),
+            ],
+            [
                 InlineKeyboardButton(text="✅ Готово", callback_data="edit_field:done"),
             ],
         ])
+
+    def _format_edit_menu_text(self, meeting: Meeting, notice: str = "") -> str:
+        """Format the current meeting state as an edit-menu message."""
+        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        photo_line = "🖼 Фото: есть" if meeting.photo_file_id else "🖼 Фото: нет"
+        prefix = f"{notice}\n\n" if notice else ""
+        return (
+            f"{prefix}"
+            f"✏️ <b>Редактирование встречи #{meeting.id}</b>\n\n"
+            f"📌 Тема: {meeting.topic}\n"
+            f"📝 Описание: {meeting.description}\n"
+            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
+            f"👥 Макс. участников: {meeting.max_participants}\n"
+            f"📍 Место: {meeting.location or 'не указано'}\n"
+            f"{photo_line}\n\n"
+            "Выбери, что хочешь изменить:"
+        )
 
     # ========== Edit Meeting Conversation Handlers ==========
 
@@ -264,21 +314,10 @@ class BotApp:
             return ConversationHandler.END
 
         context.user_data["edit_meeting_id"] = meeting_id
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-
-        text = (
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await cq.message.reply_text(
-            text,
+            self._format_edit_menu_text(meeting),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -293,6 +332,7 @@ class BotApp:
             meeting = await self.db.get_meeting(meeting_id)
             if meeting:
                 when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+                photo_line = f"\n🖼 Фото: {'есть' if meeting.photo_file_id else 'нет'}"
                 text = (
                     f"✅ Редактирование встречи #{meeting_id} завершено.\n\n"
                     f"📌 Тема: {meeting.topic}\n"
@@ -300,6 +340,7 @@ class BotApp:
                     f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
                     f"👥 Макс. участников: {meeting.max_participants}\n"
                     f"📍 Место: {meeting.location or 'не указано'}"
+                    f"{photo_line}"
                 )
                 if cq:
                     await cq.edit_message_text(text, parse_mode="HTML")
@@ -374,6 +415,80 @@ class BotApp:
         )
         return self.STATE_EDIT_MONTH
 
+    async def _edit_select_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User selected to edit the meeting photo."""
+        cq = update.callback_query
+        if not cq:
+            return self.STATE_EDIT_MENU
+        await cq.answer()
+
+        meeting_id = context.user_data.get("edit_meeting_id")
+        meeting = await self.db.get_meeting(meeting_id) if meeting_id else None
+        if not meeting:
+            await cq.message.reply_text("Сессия истекла. Начни редактирование заново.")
+            return ConversationHandler.END
+
+        if meeting.photo_file_id:
+            await cq.message.reply_photo(
+                meeting.photo_file_id,
+                caption="Текущее фото встречи. Отправь новое, чтобы заменить.",
+                reply_markup=edit_photo_keyboard(has_photo=True),
+            )
+        else:
+            await cq.message.reply_text(
+                "📸 Отправь фото для встречи.",
+                reply_markup=edit_photo_keyboard(has_photo=False),
+            )
+        return self.STATE_EDIT_PHOTO
+
+    async def _edit_photo_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle photo upload, removal, or cancel in the edit-photo state."""
+        meeting_id = context.user_data.get("edit_meeting_id")
+        if not meeting_id:
+            await update.effective_message.reply_text("Сессия истекла. Начни редактирование заново.")
+            return ConversationHandler.END
+
+        cq = update.callback_query
+        if cq:
+            await cq.answer()
+            if cq.data == "edit_photo:remove":
+                meeting = await self.db.update_meeting(meeting_id, clear_photo=True)
+                if not meeting:
+                    await cq.message.reply_text("Встреча не найдена.")
+                    return ConversationHandler.END
+                notice = "✅ Фото удалено!"
+            else:  # edit_photo:cancel
+                meeting = await self.db.get_meeting(meeting_id)
+                if not meeting:
+                    await cq.message.reply_text("Встреча не найдена.")
+                    return ConversationHandler.END
+                notice = ""
+            await cq.message.reply_text(
+                self._format_edit_menu_text(meeting, notice),
+                reply_markup=self._build_edit_menu_keyboard(),
+                parse_mode="HTML",
+            )
+            return self.STATE_EDIT_MENU
+
+        # Photo message
+        file_id = update.message.photo[-1].file_id
+        meeting = await self.db.update_meeting(meeting_id, photo_file_id=file_id)
+        if not meeting:
+            await update.message.reply_text("Встреча не найдена.")
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            self._format_edit_menu_text(meeting, "✅ Фото обновлено!"),
+            reply_markup=self._build_edit_menu_keyboard(),
+            parse_mode="HTML",
+        )
+        return self.STATE_EDIT_MENU
+
+    async def _edit_photo_invalid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reject non-photo messages in the edit-photo state."""
+        await update.effective_message.reply_text("Пожалуйста, отправь фото или используй кнопки.")
+        return self.STATE_EDIT_PHOTO
+
     # ----- Field value handlers -----
 
     async def _edit_topic_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -393,21 +508,10 @@ class BotApp:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✅ Тема обновлена!\n\n"
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await update.effective_message.reply_text(
-            text,
+            self._format_edit_menu_text(meeting, "✅ Тема обновлена!"),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -428,21 +532,10 @@ class BotApp:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✅ Описание обновлено!\n\n"
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await update.effective_message.reply_text(
-            text,
+            self._format_edit_menu_text(meeting, "✅ Описание обновлено!"),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -478,21 +571,10 @@ class BotApp:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✅ Максимум участников обновлён!\n\n"
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await update.effective_message.reply_text(
-            text,
+            self._format_edit_menu_text(meeting, "✅ Максимум участников обновлён!"),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -514,21 +596,10 @@ class BotApp:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✅ Место обновлено!\n\n"
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await update.effective_message.reply_text(
-            text,
+            self._format_edit_menu_text(meeting, "✅ Место обновлено!"),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -691,21 +762,10 @@ class BotApp:
             await query.edit_message_text("Встреча не найдена.")
             return ConversationHandler.END
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
-        text = (
-            f"✅ Дата и время обновлены!\n\n"
-            f"✏️ <b>Редактирование встречи #{meeting_id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
-            f"👥 Макс. участников: {meeting.max_participants}\n"
-            f"📍 Место: {meeting.location or 'не указано'}\n\n"
-            "Выбери, что хочешь изменить:"
-        )
         await query.edit_message_text(
-            text,
+            self._format_edit_menu_text(meeting, "✅ Дата и время обновлены!"),
             reply_markup=self._build_edit_menu_keyboard(),
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return self.STATE_EDIT_MENU
 
@@ -924,7 +984,6 @@ class BotApp:
             await query.edit_message_text("Ошибка: дата не выбрана. Начни заново с /create_meeting")
             return ConversationHandler.END
 
-        # Create datetime in local timezone and convert to UTC
         local_dt = datetime(
             year=selected_date.year,
             month=selected_date.month,
@@ -933,20 +992,45 @@ class BotApp:
             minute=minute,
             tzinfo=self.local_tz
         )
-        start_utc = local_dt.astimezone(tz.UTC)
+        context.user_data["selected_start_utc"] = local_dt.astimezone(tz.UTC)
+        await query.edit_message_text(
+            "📸 Хочешь добавить фото к встрече? (необязательно)\n"
+            "Отправь фото или нажми «Пропустить».",
+            reply_markup=photo_skip_keyboard(),
+        )
+        return self.STATE_PHOTO
 
-        # Collect all data and create meeting
+    async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data.clear()
+        await update.effective_message.reply_text("Создание встречи отменено.")
+        return ConversationHandler.END
+
+    async def _create_meeting_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle photo upload or skip, then create the meeting."""
         user = update.effective_user
         if not user:
-            await query.edit_message_text("Произошла ошибка. Попробуй ещё раз позже.")
             return ConversationHandler.END
 
-        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        cq = update.callback_query
+        if cq:
+            await cq.answer()
+            photo_file_id = None  # user skipped
+        else:
+            photo_file_id = update.message.photo[-1].file_id
+
+        start_utc = context.user_data.get("selected_start_utc")
         topic = context.user_data.get("topic")
         description = context.user_data.get("description")
         max_participants = context.user_data.get("max_participants")
         location = context.user_data.get("location")
 
+        if not all([start_utc, topic, description, max_participants]):
+            target = cq.message if cq else update.message
+            await target.reply_text("Произошла ошибка. Начни заново с /create_meeting")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
         meeting = await self.db.create_meeting(
             host_id=user.id,
             topic=topic,
@@ -954,26 +1038,37 @@ class BotApp:
             start_at_utc=start_utc,
             max_participants=max_participants,
             location=location,
+            photo_file_id=photo_file_id,
         )
         await self.scheduler.maybe_announce_new_meeting(meeting)
+
         when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        photo_line = "\n🖼 Фото: прикреплено" if photo_file_id else ""
         summary = (
             "✅ Спасибо! Встреча создана.\n\n"
-            f"📌 Название: {topic}\n"
-            f"📝 Описание: {description}\n"
+            f"📌 Название: {meeting.topic}\n"
+            f"📝 Описание: {meeting.description}\n"
             f"📅 Дата и время (Берлин): {when_local:%d.%m.%Y %H:%M}\n"
-            f"📍 Место: {location or 'не указано'}\n"
-            f"👥 Максимум участников: {max_participants}\n"
+            f"📍 Место: {meeting.location or 'не указано'}\n"
+            f"👥 Максимум участников: {meeting.max_participants}"
+            f"{photo_line}\n"
             f"🆔 ID встречи: #{meeting.id}"
         )
-        await query.edit_message_text(summary)
+        if cq:
+            await cq.edit_message_text(summary)
+        else:
+            await update.message.reply_text(summary)
+
         context.user_data.clear()
         return ConversationHandler.END
 
-    async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data.clear()
-        await update.effective_message.reply_text("Создание встречи отменено.")
-        return ConversationHandler.END
+    async def _create_meeting_photo_invalid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reject non-photo messages in the photo step."""
+        await update.effective_message.reply_text(
+            "Пожалуйста, отправь фото или нажми «Пропустить».",
+            reply_markup=photo_skip_keyboard(),
+        )
+        return self.STATE_PHOTO
 
     # ========== Command Handlers ==========
 
@@ -1161,7 +1256,7 @@ class BotApp:
             f"👤 Ведет: {host_display}\n"
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
-        await cq.message.reply_text(details_text, parse_mode="HTML")
+        await _reply_with_card(cq.message, details_text, m.photo_file_id)
 
     async def cb_cancel_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Отменить' button presses - show confirmation."""

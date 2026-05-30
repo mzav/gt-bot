@@ -161,3 +161,19 @@ class TimePickerKeyboard:
             [back_button],
         ])
 
+
+def photo_skip_keyboard() -> InlineKeyboardMarkup:
+    """Skip button for the optional photo step during meeting creation."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text="Пропустить", callback_data="skip_photo"),
+    ]])
+
+
+def edit_photo_keyboard(has_photo: bool) -> InlineKeyboardMarkup:
+    """Buttons for the edit-photo state: optionally remove existing photo, always cancel."""
+    buttons = []
+    if has_photo:
+        buttons.append(InlineKeyboardButton(text="🗑 Удалить фото", callback_data="edit_photo:remove"))
+    buttons.append(InlineKeyboardButton(text="Отмена", callback_data="edit_photo:cancel"))
+    return InlineKeyboardMarkup([buttons])
+

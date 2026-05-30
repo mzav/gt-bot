@@ -64,7 +64,8 @@ class Database:
 
     # Meetings
     async def create_meeting(self, *, host_id: int, topic: str, description: str, start_at_utc: datetime,
-                              max_participants: int, location: str | None) -> Meeting:
+                              max_participants: int, location: str | None,
+                              photo_file_id: str | None = None) -> Meeting:
         """Create a new meeting and register the host (is_host=True, doesn't count against max)."""
         async with self.session() as s:
             m = Meeting(
@@ -73,6 +74,7 @@ class Database:
                 start_at_utc=start_at_utc,
                 max_participants=max_participants,
                 location=location,
+                photo_file_id=photo_file_id,
                 created_by=host_id,
             )
             s.add(m)
@@ -260,8 +262,10 @@ class Database:
         start_at_utc: datetime | None = None,
         max_participants: int | None = None,
         location: str | None = None,
+        photo_file_id: str | None = None,
         *,
         clear_location: bool = False,
+        clear_photo: bool = False,
     ) -> Meeting | None:
         """Update meeting fields. Only provided values are updated.
 
@@ -283,6 +287,10 @@ class Database:
                 m.location = None
             elif location is not None:
                 m.location = location
+            if clear_photo:
+                m.photo_file_id = None
+            elif photo_file_id is not None:
+                m.photo_file_id = photo_file_id
             await s.commit()
             await s.refresh(m)
             return m

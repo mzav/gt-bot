@@ -124,11 +124,11 @@ def _split_messages(header: str, cards: list[str], max_len: int = _TG_MAX_MESSAG
 class BotScheduler:
     """Wrapper around AsyncIOScheduler to manage bot jobs."""
 
-    def __init__(self, db: Database, timezone, send_channel_message: Callable[[int, str], Awaitable[None]]):
+    def __init__(self, db: Database, timezone, send_channel_card: Callable[[int, str, str | None], Awaitable[None]]):
         self.db = db
         self.scheduler = AsyncIOScheduler(timezone=timezone)
         self._tz = timezone
-        self._send_channel_message = send_channel_message
+        self._send_channel_card = send_channel_card
         self._announce_days: list[int] = [1, 15]
         self._channel_id: int | None = None
 
@@ -163,7 +163,9 @@ class BotScheduler:
         meetings: Sequence[Meeting] = await self.db.list_meetings_in_range(from_utc, to_utc)
         for meeting in meetings:
             participants = await self.db.count_confirmed(meeting.id)
-            await self._send_channel_message(channel_id, _format_today_card(meeting, participants, self._tz))
+            await self._send_channel_card(
+                channel_id, _format_today_card(meeting, participants, self._tz), meeting.photo_file_id
+            )
 
     def schedule_announcements(self, days: list[int], t: time, channel_id: int | None) -> None:
         """Schedule periodic digest announcements to the configured channel."""
@@ -193,15 +195,13 @@ class BotScheduler:
         header = f"📅 <b>Meetings — {month_name}</b>"
 
         if not meetings:
-            await self._send_channel_message(channel_id, f"{header}\n\nNo meetings scheduled.")
+            await self._send_channel_card(channel_id, f"{header}\n\nNo meetings scheduled.", None)
             return
 
-        cards = [
-            _format_meeting_card(m, await self.db.count_confirmed(m.id), self._tz)
-            for m in meetings
-        ]
-        for message in _split_messages(header, cards):
-            await self._send_channel_message(channel_id, message)
+        await self._send_channel_card(channel_id, header, None)
+        for m in meetings:
+            participants = await self.db.count_confirmed(m.id)
+            await self._send_channel_card(channel_id, _format_meeting_card(m, participants, self._tz), m.photo_file_id)
 
     async def maybe_announce_new_meeting(self, meeting: Meeting) -> None:
         """Send an immediate channel announcement if the meeting won't appear in any future digest.
@@ -215,7 +215,8 @@ class BotScheduler:
         if _covered_by_future_announcement(meeting_date, today, self._announce_days):
             return
         participants = await self.db.count_confirmed(meeting.id)
-        await self._send_channel_message(
+        await self._send_channel_card(
             self._channel_id,
             _format_new_meeting_card(meeting, participants, self._tz),
+            meeting.photo_file_id,
         )
