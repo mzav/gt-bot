@@ -13,6 +13,7 @@ from typing import AsyncIterator, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy import select, func, update
+from sqlalchemy.engine import Row
 
 from .models import Base, User, Meeting, Registration, RegistrationStatus
 
@@ -167,16 +168,31 @@ class Database:
             return await s.get(User, user_id)
 
     # Registration
-    async def register(self, meeting_id: int, user_id: int) -> tuple[bool, str]:
+    async def list_confirmed_participants(self, meeting_id: int) -> Sequence[Row[tuple[Registration, User]]]:
+        """Return confirmed non-host registrations joined with user data, ordered by signup time."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(Registration, User)
+                .join(User, User.id == Registration.user_id)
+                .where(
+                    Registration.meeting_id == meeting_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
+                    Registration.is_host == False,  # noqa: E712
+                )
+                .order_by(Registration.created_at.asc())
+            )
+            return res.all()
+
+    async def register(self, meeting_id: int, user_id: int) -> tuple[bool, str, str | None]:
         """Register a user for a meeting, using waitlist if full.
 
         Returns:
-            Tuple[bool, str]: Success flag and a human-readable message.
+            Tuple of (success, message, registration_status). Status is None on failure.
         """
         async with self.session() as s:
             m = await s.get(Meeting, meeting_id)
             if m is None or m.canceled_at is not None:
-                return False, "Meeting not found or canceled."
+                return False, "Meeting not found or canceled.", None
             # Check if already registered
             res = await s.execute(
                 select(Registration).where(Registration.meeting_id == meeting_id, Registration.user_id == user_id,
@@ -184,7 +200,7 @@ class Database:
             )
             existing = res.scalar_one_or_none()
             if existing:
-                return False, "You are already registered."
+                return False, "You are already registered.", None
             # Count current confirmed
             res = await s.execute(
                 select(func.count()).select_from(Registration).where(
@@ -197,8 +213,8 @@ class Database:
             s.add(reg)
             await s.commit()
             if status == RegistrationStatus.WAITLISTED:
-                return True, "Meeting is full. You are added to the waitlist."
-            return True, "Registered successfully."
+                return True, "Meeting is full. You are added to the waitlist.", status
+            return True, "Registered successfully.", status
 
     async def is_registered(self, meeting_id: int, user_id: int) -> bool:
         """Check if user has an active (confirmed or waitlisted) registration."""

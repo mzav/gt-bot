@@ -45,6 +45,11 @@ class Settings(BaseModel):
 
     log_level: str = "INFO"
 
+    # Participant change notifications: send instant DMs below this threshold,
+    # batch into a digest at/above it.
+    notify_batch_threshold: int = 10
+    notify_batch_interval_minutes: int = 30
+
     def tzinfo(self) -> zoneinfo.ZoneInfo:
         """Return ZoneInfo instance for the configured time zone."""
         return zoneinfo.ZoneInfo(self.tz)
@@ -94,6 +99,8 @@ def load_settings() -> Settings:
     announce_time = os.getenv("ANNOUNCE_TIME", "10:00")
     daily_check_time = os.getenv("DAILY_CHECK_TIME", "09:00")
     log_level = os.getenv("LOG_LEVEL", "INFO")
+    notify_batch_threshold = int(os.getenv("NOTIFY_BATCH_THRESHOLD", "10"))
+    notify_batch_interval_minutes = int(os.getenv("NOTIFY_BATCH_INTERVAL_MINUTES", "30"))
 
     return Settings(
         telegram_bot_token=token,
@@ -104,4 +111,6 @@ def load_settings() -> Settings:
         announce_time=announce_time,
         daily_check_time=daily_check_time,
         log_level=log_level,
+        notify_batch_threshold=notify_batch_threshold,
+        notify_batch_interval_minutes=notify_batch_interval_minutes,
     )

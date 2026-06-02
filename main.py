@@ -66,8 +66,14 @@ async def main_async() -> None:
         else:
             await application.bot.send_message(chat_id=channel_id, text=text, parse_mode="HTML")
 
-    # Scheduler
-    scheduler = BotScheduler(db=db, timezone=settings.tzinfo(), send_channel_card=send_channel_card)
+    # Scheduler (bot passed for host DM notifications)
+    scheduler = BotScheduler(
+        db=db,
+        timezone=settings.tzinfo(),
+        send_channel_card=send_channel_card,
+        bot=application.bot,
+        notify_threshold=settings.notify_batch_threshold,
+    )
     # Re-assign scheduler into bot_app instance so hooks work
     bot_app.scheduler = scheduler
 
@@ -75,6 +81,7 @@ async def main_async() -> None:
     announce_conf = settings.announce_config()
     scheduler.schedule_announcements(announce_conf.days, announce_conf.time_of_day, settings.announcements_channel_id)
     scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
+    scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)
 
     # Explicit Application lifecycle to ensure an event loop exists (Python 3.12)
     await application.initialize()

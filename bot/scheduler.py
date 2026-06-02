@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import calendar
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Callable, Awaitable, Sequence
+from typing import Callable, Awaitable, Literal, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from dateutil import tz
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .storage import Database
-from .models import Meeting
+from .models import Meeting, User
 from .utils import ensure_utc
+
+log = logging.getLogger(__name__)
 
 # Days before the second (and further) announce day to start the coverage window.
 # E.g. announce on 15th → cover meetings from 18th onward.
@@ -121,16 +128,41 @@ def _split_messages(header: str, cards: list[str], max_len: int = _TG_MAX_MESSAG
     return messages
 
 
+@dataclass
+class _ParticipantEvent:
+    user_name: str
+    event: Literal["joined", "left"]
+    at: datetime = field(default_factory=datetime.utcnow)
+
+
+def _display_name(user: User) -> str:
+    """Format a display name, appending @username when available."""
+    if user.username:
+        return f"{user.name} (@{user.username})" if user.name else f"@{user.username}"
+    return user.name or f"User#{user.id}"
+
+
 class BotScheduler:
     """Wrapper around AsyncIOScheduler to manage bot jobs."""
 
-    def __init__(self, db: Database, timezone, send_channel_card: Callable[[int, str, str | None], Awaitable[None]]):
+    def __init__(
+        self,
+        db: Database,
+        timezone,
+        send_channel_card: Callable[[int, str, str | None], Awaitable[None]],
+        *,
+        bot: Bot | None = None,
+        notify_threshold: int = 10,
+    ):
         self.db = db
         self.scheduler = AsyncIOScheduler(timezone=timezone)
         self._tz = timezone
         self._send_channel_card = send_channel_card
+        self._bot = bot
+        self._notify_threshold = notify_threshold
         self._announce_days: list[int] = [1, 15]
         self._channel_id: int | None = None
+        self._pending_events: dict[int, list[_ParticipantEvent]] = defaultdict(list)
 
     def start(self) -> None:
         """Start the underlying scheduler if not already running."""
@@ -202,6 +234,96 @@ class BotScheduler:
         for m in meetings:
             participants = await self.db.count_confirmed(m.id)
             await self._send_channel_card(channel_id, _format_meeting_card(m, participants, self._tz), m.photo_file_id)
+
+    def schedule_host_notifications(self, interval_minutes: int) -> None:
+        """Register a periodic job to flush batched participant-change DMs to hosts."""
+        if not self._bot:
+            return
+        self.scheduler.add_job(
+            self._flush_pending_notifications,
+            trigger=IntervalTrigger(minutes=interval_minutes),
+            id="host_notifications_flush",
+            replace_existing=True,
+        )
+
+    async def on_participant_change(
+        self,
+        meeting: Meeting,
+        user: User,
+        event: Literal["joined", "left"],
+        confirmed_count: int,
+    ) -> None:
+        """Route a signup or cancellation to instant DM or the batch queue."""
+        if not self._bot:
+            return
+        if confirmed_count < self._notify_threshold:
+            await self._send_instant_notification(meeting, user, event, confirmed_count)
+        else:
+            self._pending_events[meeting.id].append(
+                _ParticipantEvent(user_name=_display_name(user), event=event)
+            )
+
+    async def _send_instant_notification(
+        self,
+        meeting: Meeting,
+        user: User,
+        event: Literal["joined", "left"],
+        confirmed_count: int,
+    ) -> None:
+        icon = "➕" if event == "joined" else "➖"
+        action = "записалась на" if event == "joined" else "отменила участие в"
+        text = (
+            f"{icon} <b>{_display_name(user)}</b> {action} «{meeting.topic}»\n"
+            f"Участников: {confirmed_count} / {meeting.max_participants}"
+        )
+        await self._send_host_dm(meeting.created_by, text)
+
+    async def _flush_pending_notifications(self) -> None:
+        """Send batched digest DMs for all meetings with queued events, then clear the queue."""
+        if not self._pending_events:
+            return
+        # Snapshot and clear atomically before any awaits to avoid double-sending on slow runs
+        pending = dict(self._pending_events)
+        self._pending_events.clear()
+
+        for meeting_id, events in pending.items():
+            if not events:
+                continue
+            meeting = await self.db.get_meeting(meeting_id)
+            if not meeting or meeting.canceled_at:
+                continue
+
+            joined = sum(1 for e in events if e.event == "joined")
+            left = sum(1 for e in events if e.event == "left")
+            confirmed = await self.db.count_confirmed(meeting_id)
+
+            parts = []
+            if joined:
+                parts.append(f"+{joined} записались")
+            if left:
+                parts.append(f"−{left} отменили")
+
+            text = (
+                f"📊 <b>Обновление участников — «{meeting.topic}»</b>\n"
+                f"{', '.join(parts)}\n"
+                f"Сейчас: {confirmed} / {meeting.max_participants}"
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Посмотреть список", callback_data=f"participants:{meeting_id}")
+            ]])
+            await self._send_host_dm(meeting.created_by, text, reply_markup=keyboard)
+
+    async def _send_host_dm(self, host_id: int, text: str, *, reply_markup=None) -> None:
+        """Send a DM to the meeting host, logging and suppressing send errors."""
+        try:
+            await self._bot.send_message(
+                chat_id=host_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            log.warning("Failed to send DM to host %d", host_id)
 
     async def maybe_announce_new_meeting(self, meeting: Meeting) -> None:
         """Send an immediate channel announcement if the meeting won't appear in any future digest.
