@@ -19,7 +19,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from .config import Settings
-from .models import Meeting
+from .models import Meeting, User, RegistrationStatus
 from .storage import Database
 from .scheduler import BotScheduler
 from .utils import ensure_utc
@@ -93,6 +93,7 @@ class BotApp:
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_details, pattern=r"^details:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_participants, pattern=r"^participants:\d+$"))
         app.add_handler(self._build_edit_meeting_handler())
         app.add_handler(CallbackQueryHandler(self.cb_cancel_meeting, pattern=r"^cancel:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_cancel_confirm, pattern=r"^cancel_confirm:\d+$"))
@@ -220,10 +221,16 @@ class BotApp:
         can_register = include_register and not is_host and not is_participant and available > 0
         if is_host:
             buttons = [
-                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
-                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
-                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
+                [
+                    InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                    InlineKeyboardButton(text="Участники", callback_data=f"participants:{meeting_id}"),
+                ],
+                [
+                    InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
+                    InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
+                ],
             ]
+            return InlineKeyboardMarkup(buttons)
         elif can_register:
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
@@ -239,6 +246,24 @@ class BotApp:
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
             ]
         return InlineKeyboardMarkup([buttons])
+
+    @staticmethod
+    def _format_participant_list(meeting: Meeting, rows, max_participants: int) -> str:
+        """Format a numbered participant list for host display."""
+        if not rows:
+            return (
+                f"<b>Участники встречи «{meeting.topic}»</b>\n\n"
+                f"Пока никто не записался.\n"
+                f"Итого: 0 / {max_participants}"
+            )
+        lines = [f"<b>Участники встречи «{meeting.topic}»</b>\n"]
+        for i, row in enumerate(rows, start=1):
+            _, user = row
+            name = user.name or ""
+            username_part = f" (@{user.username})" if user.username else ""
+            lines.append(f"{i}. {name}{username_part}")
+        lines.append(f"\nИтого: {len(rows)} / {max_participants}")
+        return "\n".join(lines)
 
     def _build_edit_menu_keyboard(self) -> InlineKeyboardMarkup:
         """Build the inline keyboard for selecting which field to edit."""
@@ -1159,7 +1184,7 @@ class BotApp:
         user = update.effective_user
         if not user:
             return
-        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
         if not context.args:
             await update.effective_message.reply_text("Usage: /register <meeting_id>")
             return
@@ -1168,15 +1193,20 @@ class BotApp:
         except Exception:
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
-        ok, msg = await self.db.register(meeting_id, user.id)
+        ok, msg, reg_status = await self.db.register(meeting_id, user.id)
         await update.effective_message.reply_text(msg)
+        if ok and reg_status == RegistrationStatus.CONFIRMED:
+            meeting = await self.db.get_meeting(meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting_id)
+                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
 
     async def cmd_unregister(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Unregister current user from a meeting by ID."""
         user = update.effective_user
         if not user:
             return
-        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
         if not context.args:
             await update.effective_message.reply_text("Usage: /unregister <meeting_id>")
             return
@@ -1187,6 +1217,11 @@ class BotApp:
             return
         ok, msg = await self.db.unregister(meeting_id, user.id)
         await update.effective_message.reply_text(msg)
+        if ok:
+            meeting = await self.db.get_meeting(meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting_id)
+                await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
 
     # ========== Callback Query Handlers ==========
 
@@ -1199,7 +1234,7 @@ class BotApp:
         user = update.effective_user
         if not user:
             return
-        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
         data = cq.data or ""
         try:
             _, meeting_id_str = data.split(":", 1)
@@ -1207,8 +1242,13 @@ class BotApp:
         except Exception:
             await cq.message.reply_text("Invalid registration request.")
             return
-        ok, msg = await self.db.register(meeting_id, user.id)
+        ok, msg, reg_status = await self.db.register(meeting_id, user.id)
         await cq.message.reply_text(msg)
+        if ok and reg_status == RegistrationStatus.CONFIRMED:
+            meeting = await self.db.get_meeting(meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting_id)
+                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
 
     async def cb_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Подробности' button presses to show meeting details."""
@@ -1257,6 +1297,38 @@ class BotApp:
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
         await _reply_with_card(cq.message, details_text, m.photo_file_id)
+
+    async def cb_participants(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the host a numbered list of confirmed participants for their meeting."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        user = update.effective_user
+        if not user:
+            return
+
+        data = cq.data or ""
+        try:
+            _, meeting_id_str = data.split(":", 1)
+            meeting_id = int(meeting_id_str)
+        except Exception:
+            await cq.message.reply_text("Ошибка: неверный запрос.")
+            return
+
+        meeting = await self.db.get_meeting(meeting_id)
+        if not meeting:
+            await cq.message.reply_text("Встреча не найдена.")
+            return
+
+        if meeting.created_by != user.id:
+            await cq.message.reply_text("Список участников доступен только организатору встречи.")
+            return
+
+        rows = await self.db.list_confirmed_participants(meeting_id)
+        text = self._format_participant_list(meeting, rows, meeting.max_participants)
+        await cq.message.reply_text(text, parse_mode="HTML")
 
     async def cb_cancel_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Отменить' button presses - show confirmation."""
@@ -1445,6 +1517,11 @@ class BotApp:
                 + " отменено."
             )
             await cq.edit_message_text(text, parse_mode="HTML")
+            if meeting:
+                db_user = await self.db.get_user(user.id)
+                if db_user:
+                    confirmed = await self.db.count_confirmed(meeting_id)
+                    await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
         else:
             await cq.edit_message_text(f"Не удалось отменить участие: {msg}")
 
