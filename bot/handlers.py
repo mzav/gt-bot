@@ -85,6 +85,7 @@ class BotApp:
         """Create and configure the PTB Application with command handlers."""
         app = ApplicationBuilder().token(self.settings.telegram_bot_token).build()
 
+        app.add_handler(CommandHandler("force_summary", self.cmd_force_summary))
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))
         app.add_handler(CommandHandler("upcoming_meetings", self.cmd_meetings))
         app.add_handler(CommandHandler("my_meetings", self.cmd_my))
@@ -1096,6 +1097,19 @@ class BotApp:
         return self.STATE_PHOTO
 
     # ========== Command Handlers ==========
+
+    async def cmd_force_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manually trigger the announcement summary (admin-only)."""
+        user = update.effective_user
+        if not user or user.id not in self.settings.admin_user_ids:
+            await update.effective_message.reply_text("Not authorized.")
+            return
+        if not self.settings.announcements_channel_id:
+            await update.effective_message.reply_text("No announcements channel configured.")
+            return
+        await update.effective_message.reply_text("Sending announcement summary...")
+        await self.scheduler.run_announcement_now()
+        await update.effective_message.reply_text("Done.")
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start and /help: greet user and list commands."""

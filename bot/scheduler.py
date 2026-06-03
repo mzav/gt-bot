@@ -69,14 +69,14 @@ def _covered_by_future_announcement(meeting_date: date, today: date, announce_da
     return False
 
 
-def _format_meeting_card(meeting: Meeting, participants: int, local_tz) -> str:
+def _format_meeting_card(meeting: Meeting, confirmed: int, hosts: int, host: User | None, local_tz) -> str:
     """Format a single meeting as a rich text card (HTML)."""
     when_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
     lines = [
+        f"<b>{when_local:%d.%m (%A) %H:%M}</b>",
         f"<b>{meeting.topic}</b>",
-        meeting.description or "",
-        f"📆 {when_local:%d %B at %H:%M}",
-        f"👥 {participants} participant{'s' if participants != 1 else ''}",
+        f"Ведет {_display_name(host)}." if host else "",
+        f"🌻 Registered: {confirmed} / {meeting.max_participants} participants (+ведущих: {hosts})",
     ]
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
@@ -213,6 +213,12 @@ class BotScheduler:
             replace_existing=True,
         )
 
+    async def run_announcement_now(self) -> None:
+        """Trigger the announcement job immediately (for manual/admin use)."""
+        if not self._channel_id:
+            return
+        await self._announcement_job(self._channel_id)
+
     async def _announcement_job(self, channel_id: int) -> None:
         """Compose and send a monthly meetings digest to the announcements channel."""
         today_local = datetime.now(self._tz).date()
@@ -230,10 +236,15 @@ class BotScheduler:
             await self._send_channel_card(channel_id, f"{header}\n\nNo meetings scheduled.", None)
             return
 
-        await self._send_channel_card(channel_id, header, None)
+        cards = []
         for m in meetings:
-            participants = await self.db.count_confirmed(m.id)
-            await self._send_channel_card(channel_id, _format_meeting_card(m, participants, self._tz), m.photo_file_id)
+            confirmed = await self.db.count_confirmed(m.id)
+            hosts = await self.db.count_hosts(m.id)
+            host = await self.db.get_user(m.created_by)
+            cards.append(_format_meeting_card(m, confirmed, hosts, host, self._tz))
+
+        for message in _split_messages(header, cards):
+            await self._send_channel_card(channel_id, message, None)
 
     def schedule_host_notifications(self, interval_minutes: int) -> None:
         """Register a periodic job to flush batched participant-change DMs to hosts."""
