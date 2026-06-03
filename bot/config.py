@@ -50,6 +50,9 @@ class Settings(BaseModel):
     notify_batch_threshold: int = 10
     notify_batch_interval_minutes: int = 30
 
+    # Telegram user IDs allowed to use privileged commands (e.g. /force_summary).
+    admin_user_ids: List[int] = Field(default_factory=list)
+
     def tzinfo(self) -> zoneinfo.ZoneInfo:
         """Return ZoneInfo instance for the configured time zone."""
         return zoneinfo.ZoneInfo(self.tz)
@@ -101,6 +104,8 @@ def load_settings() -> Settings:
     log_level = os.getenv("LOG_LEVEL", "INFO")
     notify_batch_threshold = int(os.getenv("NOTIFY_BATCH_THRESHOLD", "10"))
     notify_batch_interval_minutes = int(os.getenv("NOTIFY_BATCH_INTERVAL_MINUTES", "30"))
+    admin_ids_env = os.getenv("ADMIN_USER_IDS", "")
+    admin_user_ids = [int(x) for x in admin_ids_env.split(",") if x.strip().lstrip("-").isdigit()]
 
     return Settings(
         telegram_bot_token=token,
@@ -113,4 +118,5 @@ def load_settings() -> Settings:
         log_level=log_level,
         notify_batch_threshold=notify_batch_threshold,
         notify_batch_interval_minutes=notify_batch_interval_minutes,
+        admin_user_ids=admin_user_ids,
     )
