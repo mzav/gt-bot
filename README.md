@@ -9,6 +9,7 @@ This bot helps members to:
 - See "my meetings" (as a host or participant)
 - Receive notifications for upcoming meetings (3 days and 1 day before)
 - Publish twice‑per‑month announcements to a separate GirlTalkAnnouncements Telegram channel
+- Open a specific meeting directly from a channel announcement via a deep link
 
 ## Features
 - Meeting lifecycle
@@ -19,6 +20,7 @@ This bot helps members to:
 - Discovery
   - List of all upcoming meetings
   - List of "my meetings" if the user is host or is registered
+  - Meeting deep links from channel announcements (`/start m_<token>`)
 - Notifications
   - Automatic reminders for participants and hosts:
     - 3 days before event
@@ -26,6 +28,8 @@ This bot helps members to:
   - Host DM on participant signup/cancel: instant below threshold, batched digest above it
 - Announcements
   - Twice per month, publish a digest/announcement post to a dedicated Telegram channel (GirlTalkAnnouncements)
+  - Each announced meeting includes a CTA button linking to the bot with that meeting pre-selected
+  - Spontaneous and same-day meeting posts also include the CTA button
 
 ## Tech stack
 - python-telegram-bot (PTB) >= 21.5 — async Telegram Bot API framework
@@ -53,6 +57,7 @@ bot/
   storage.py         — DB session and CRUD helpers
   handlers.py        — PTB command and callback handlers
   keyboards.py       — inline keyboard builders
+  links.py           — meeting deep-link builders and /start payload parsing
   scheduler.py       — APScheduler jobs (reminders, announcements, host DMs)
   utils.py           — shared formatting helpers
 tests/               — automated tests
@@ -74,6 +79,9 @@ pip install -r requirements.txt
 ```
 # Telegram API
 BOT_TOKEN=123456:ABC-YourBotTokenFromBotFather
+
+# Bot username without @ — required in production for channel deep-link buttons
+BOT_USERNAME=YourBotName
 
 # Database (defaults to ./gtbot.db locally; /data/gtbot.db in production)
 DATABASE_URL=sqlite+aiosqlite:///./gtbot.db
@@ -113,6 +121,7 @@ python main.py
 
 ## Expected user commands and flows
 - /start — Welcome and brief help
+- /start m_<public_token> — Open a specific meeting (from a channel deep link); shows the same card and action buttons as `/upcoming_meetings` (register, leave, details, host actions)
 - /help — Show available commands and usage
 - /create_meeting — Create a new meeting via guided prompts:
   - Topic
@@ -130,9 +139,31 @@ python main.py
 
 Inline buttons are used for register/unregister, edit/cancel, and navigating lists.
 
+## Meeting deep links
+
+Each meeting has a stable `public_token` (12-character URL-safe string, unique). It is generated automatically on creation, backfilled for existing meetings at startup, and never changes when a meeting is edited.
+
+**Link format:**
+```
+https://t.me/<BOT_USERNAME>?start=m_<public_token>
+```
+
+**Channel announcements** include a CTA built from this link:
+- Twice-monthly digest — one packed message listing all meetings, each with an inline HTML link
+- Spontaneous new-meeting posts — inline URL button (when not covered by a future digest)
+- Same-day “meeting today” posts — inline URL button
+
+**Bot behavior when a user opens the link:**
+1. `/start` receives payload `m_<public_token>`
+2. Bot looks up the meeting by `public_token` (not database id)
+3. If available, shows the meeting card with contextual buttons (same as `/upcoming_meetings`)
+4. If invalid, not found, canceled, or past — shows a friendly message and a button to list upcoming meetings
+
+`BOT_USERNAME` should be set in production. If omitted, the bot resolves it via `getMe()` at startup; channel CTAs are skipped when no username is available.
+
 ## Data model
 - User: id (Telegram user id), name, username
-- Meeting: id, topic, description, start_at (timezone-aware UTC), max_participants, location, photo_file_id, created_by, created_at, updated_at, canceled_at (nullable)
+- Meeting: id, topic, description, start_at (timezone-aware UTC), max_participants, location, photo_file_id, public_token (unique, for deep links), created_by, created_at, updated_at, canceled_at (nullable)
 - Registration: id, meeting_id, user_id, status (confirmed|waitlisted|canceled), created_at
 
 ## Notifications and scheduling
@@ -144,7 +175,8 @@ Inline buttons are used for register/unregister, edit/cancel, and navigating lis
   - Batched digest (every `NOTIFY_BATCH_INTERVAL_MINUTES`) when at or above threshold
 - Announcement jobs:
   - Twice per month on set days (e.g., 1 and 15) at `ANNOUNCE_TIME` in `TIMEZONE`
-  - Post a digest of upcoming meetings to `ANNOUNCEMENTS_CHANNEL_ID`
+  - Post a digest of upcoming meetings to `ANNOUNCEMENTS_CHANNEL_ID` (one message, deep-link per meeting)
+  - Daily job at `DAILY_CHECK_TIME` posts same-day meetings to the channel with CTA buttons
 
 APScheduler uses `AsyncIOScheduler` with timezone from `TIMEZONE`. Jobs are rehydrated on startup from the database.
 
@@ -163,7 +195,7 @@ The bot runs on [Railway](https://railway.app) via Docker. See `DECISIONS.md` fo
 - [Litestream](https://litestream.io) streams SQLite WAL backups to Backblaze B2 continuously (see `litestream.yml`)
 
 ### Required env vars in production (Railway → Variables)
-All `.env` vars above, plus Litestream backup vars:
+All `.env` vars above (including `BOT_USERNAME` when using channel announcements), plus Litestream backup vars:
 ```
 LITESTREAM_BUCKET=your-b2-bucket-name
 LITESTREAM_ENDPOINT=https://s3.us-west-002.backblazeb2.com
@@ -179,10 +211,14 @@ litestream restore -config litestream.yml /data/gtbot.db
 ## Security and moderation
 - Only allow meeting cancel/edit for host
 - Validate inputs with pydantic
+- Deep-link payloads are treated as untrusted input; format is validated before DB lookup
+- Public meeting tokens are opaque (no raw database ids in channel links or user-facing text)
+- Registration and host permissions are unchanged — deep links cannot bypass existing checks
 - Rate-limit heavy commands if needed
 
 ## Development roadmap
 - v0: CRUD for meetings, registration, lists, reminders, edit/cancel ✓
+- v0.1: Meeting deep links from channel announcements ✓
 - v1: Waitlist auto-promotion, HTML escaping, global error handler
 - v1.1: iCal export, richer formatting, pagination
 - v2: Web admin dashboard (optional)

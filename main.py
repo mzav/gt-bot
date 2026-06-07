@@ -18,7 +18,7 @@ from bot.handlers import BotApp
 _CAPTION_LIMIT = 1024
 
 
-async def _run_migrations(engine) -> None:
+async def _run_migrations(engine, db: Database) -> None:
     """Add columns introduced after initial schema creation."""
     from sqlalchemy import text
     from sqlalchemy.exc import OperationalError
@@ -28,6 +28,23 @@ async def _run_migrations(engine) -> None:
             await conn.commit()
         except OperationalError:
             pass  # column already exists
+        try:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN public_token VARCHAR(64)"))
+            await conn.commit()
+        except OperationalError:
+            pass  # column already exists
+        try:
+            await conn.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS ix_meetings_public_token ON meetings(public_token)")
+            )
+            await conn.commit()
+        except OperationalError:
+            pass
+
+    backfilled = await db.backfill_meeting_public_tokens()
+    if backfilled:
+        log = logging.getLogger("gt-bot")
+        log.info("Backfilled public_token for %d meeting(s)", backfilled)
 
 
 async def main_async() -> None:
@@ -47,24 +64,47 @@ async def main_async() -> None:
     # Database
     db = Database(settings.database_url)
     await db.create_all()
-    await _run_migrations(db.engine)
+    await _run_migrations(db.engine, db)
 
     bot_app = BotApp(settings, db, None)  # type: ignore[arg-type]
 
     # Create application first so we can send messages via scheduler
     application = bot_app.build()
 
-    async def send_channel_card(channel_id: int, text: str, photo_file_id: str | None = None) -> None:
+    await application.initialize()
+    bot_username = settings.telegram_bot_username
+    if not bot_username:
+        me = await application.bot.get_me()
+        bot_username = me.username
+    if settings.announcements_channel_id and not bot_username:
+        log.error("BOT_USERNAME is required for meeting deep links in channel announcements")
+    bot_app.bot_username = bot_username
+
+    async def send_channel_card(
+        channel_id: int,
+        text: str,
+        photo_file_id: str | None = None,
+        *,
+        reply_markup=None,
+    ) -> None:
         if photo_file_id:
             if len(text) <= _CAPTION_LIMIT:
                 await application.bot.send_photo(
-                    chat_id=channel_id, photo=photo_file_id, caption=text, parse_mode="HTML"
+                    chat_id=channel_id,
+                    photo=photo_file_id,
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
                 )
             else:
-                await application.bot.send_photo(chat_id=channel_id, photo=photo_file_id)
-                await application.bot.send_message(chat_id=channel_id, text=text, parse_mode="HTML")
+                await application.bot.send_photo(chat_id=channel_id, photo=photo_file_id, reply_markup=reply_markup)
+                await application.bot.send_message(
+                    chat_id=channel_id, text=text, parse_mode="HTML", reply_markup=reply_markup
+                )
         else:
-            await application.bot.send_message(chat_id=channel_id, text=text, parse_mode="HTML")
+            await application.bot.send_message(
+                chat_id=channel_id, text=text, parse_mode="HTML", reply_markup=reply_markup
+            )
 
     # Scheduler (bot passed for host DM notifications)
     scheduler = BotScheduler(
@@ -73,6 +113,7 @@ async def main_async() -> None:
         send_channel_card=send_channel_card,
         bot=application.bot,
         notify_threshold=settings.notify_batch_threshold,
+        bot_username=bot_username,
     )
     # Re-assign scheduler into bot_app instance so hooks work
     bot_app.scheduler = scheduler
@@ -83,8 +124,6 @@ async def main_async() -> None:
     scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
     scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)
 
-    # Explicit Application lifecycle to ensure an event loop exists (Python 3.12)
-    await application.initialize()
     try:
         # Ensure scheduler is running even if post_init hook changes in PTB
         scheduler.start()
