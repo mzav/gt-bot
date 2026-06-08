@@ -82,6 +82,21 @@ No tests cover the new conversation handler, cancel confirmation flow, host-only
 
 ---
 
+### Automated tests for meeting deep links
+
+**Priority:** Medium
+
+No tests cover `public_token` generation, backfill, `parse_start_payload`, `build_meeting_deep_link`, or `/start m_<token>` routing.
+
+**Suggested coverage:**
+
+- Token uniqueness and format validation
+- `/start` with valid token shows meeting card with correct keyboard (host / participant / guest)
+- Fallback messages for invalid payload, unknown token, canceled meeting, past meeting
+- Channel CTA keyboard built only when `BOT_USERNAME` and `public_token` are present
+
+---
+
 ### Global error handler for callback failures
 
 **Priority:** Medium
@@ -90,8 +105,8 @@ No `Application.add_error_handler` is registered. Unhandled exceptions in button
 
 ---
 
-### README — mark edit/cancel as implemented
+### README — participant reminder jobs
 
 **Priority:** Low
 
-README still lists edit/cancel as "planned" under Features and Commands. Update when the feature ships.
+README still describes 3-day and 1-day participant reminder DMs. The daily scheduler job currently posts same-day meeting announcements to the channel only; `_reminder_job` is not implemented. Align docs when reminders ship or remove the claim.

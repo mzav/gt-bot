@@ -97,4 +97,36 @@ Run [Litestream](https://litestream.io) as a background process inside the Docke
 
 ---
 
+## 005 · Meeting deep links — public tokens
+
+**Date:** 2026-06-06
+**Status:** Decided
+
+### Decision
+Expose meetings in channel announcements via Telegram deep links using opaque `public_token` values, not database ids.
+
+**Link format:** `https://t.me/<BOT_USERNAME>?start=m_<public_token>`
+
+### Reasoning
+- Channel posts are public; integer meeting ids are guessable and leak internal structure.
+- Telegram `/start` payloads are limited to 64 characters; a 12-character URL-safe token plus `m_` prefix fits comfortably.
+- Tokens are generated with `secrets` (stdlib), stored with a unique index, assigned on create, and backfilled at startup for existing rows.
+- Tokens are stable across edits — links in old channel posts keep working until the meeting is canceled or passes.
+- Reuses existing meeting list/detail UI and registration logic; deep link is only an entry path.
+
+### Implementation notes
+- `bot/links.py` — token generation, link builder, payload parser
+- `BOT_USERNAME` env var; falls back to `bot.get_me().username` at startup
+- Digest keeps one packed message with an HTML deep link per meeting; single-meeting posts use inline URL buttons
+- Invalid, missing, canceled, or past meetings show a fallback message with a button to list upcoming meetings
+
+### Alternatives considered
+| Option | Why rejected |
+|---|---|
+| Numeric id in payload (`start=meet_123`) | Guessable; exposes internal ids in public URLs |
+| UUID v4 (36 chars) | Works but longer than needed for this scale |
+| Signed JWT payloads | Overkill; adds crypto dependency and expiry handling for a simple open-registration flow |
+
+---
+
 <!-- Add new entries above this line, incrementing the number. -->

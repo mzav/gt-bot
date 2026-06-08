@@ -34,6 +34,7 @@ class Settings(BaseModel):
     list of supported variables.
     """
     telegram_bot_token: str
+    telegram_bot_username: str | None = None
     database_url: str = "sqlite+aiosqlite:////data/gtbot.db"
     tz: str = "Europe/Berlin"
 
@@ -93,6 +94,7 @@ def load_settings() -> Settings:
     if not token:
         logging.getLogger(__name__).warning("BOT_TOKEN is not set; the bot will not start properly.")
         token = ""  # allow object creation; app will fail to start if used
+    bot_username = os.getenv("BOT_USERNAME", "").strip().lstrip("@") or None
     db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./gtbot.db")
     tz_name = os.getenv("TIMEZONE", "Europe/Berlin")
     channel_id = os.getenv("ANNOUNCEMENTS_CHANNEL_ID")
@@ -109,6 +111,7 @@ def load_settings() -> Settings:
 
     return Settings(
         telegram_bot_token=token,
+        telegram_bot_username=bot_username,
         database_url=db_url,
         tz=tz_name,
         announcements_channel_id=channel_id_int,

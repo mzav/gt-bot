@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy import select, func, update
 from sqlalchemy.engine import Row
 
+from .links import generate_meeting_public_token
 from .models import Base, User, Meeting, Registration, RegistrationStatus
 
 log = logging.getLogger(__name__)
@@ -63,12 +64,37 @@ class Database:
                 await s.commit()
             return u
 
+    async def _generate_unique_public_token(self, session: AsyncSession) -> str:
+        """Generate a meeting public_token that is not already in use."""
+        for _ in range(10):
+            token = generate_meeting_public_token()
+            res = await session.execute(
+                select(Meeting.id).where(Meeting.public_token == token)
+            )
+            if res.scalar_one_or_none() is None:
+                return token
+        raise RuntimeError("failed to generate unique meeting public_token")
+
+    async def backfill_meeting_public_tokens(self) -> int:
+        """Assign public_token to meetings that do not have one yet."""
+        updated = 0
+        async with self.session() as s:
+            res = await s.execute(select(Meeting).where(Meeting.public_token.is_(None)))
+            meetings = res.scalars().all()
+            for meeting in meetings:
+                meeting.public_token = await self._generate_unique_public_token(s)
+                updated += 1
+            if updated:
+                await s.commit()
+        return updated
+
     # Meetings
     async def create_meeting(self, *, host_id: int, topic: str, description: str, start_at_utc: datetime,
                               max_participants: int, location: str | None,
                               photo_file_id: str | None = None) -> Meeting:
         """Create a new meeting and register the host (is_host=True, doesn't count against max)."""
         async with self.session() as s:
+            public_token = await self._generate_unique_public_token(s)
             m = Meeting(
                 topic=topic,
                 description=description,
@@ -76,6 +102,7 @@ class Database:
                 max_participants=max_participants,
                 location=location,
                 photo_file_id=photo_file_id,
+                public_token=public_token,
                 created_by=host_id,
             )
             s.add(m)
@@ -91,6 +118,12 @@ class Database:
         """Return meeting by id or None if not found."""
         async with self.session() as s:
             return await s.get(Meeting, meeting_id)
+
+    async def get_meeting_by_public_token(self, public_token: str) -> Meeting | None:
+        """Return meeting by public deep-link token or None if not found."""
+        async with self.session() as s:
+            res = await s.execute(select(Meeting).where(Meeting.public_token == public_token))
+            return res.scalar_one_or_none()
 
     async def list_meetings_in_range(self, from_utc: datetime, to_utc: datetime) -> Sequence[Meeting]:
         """List non-canceled meetings whose start time falls within [from_utc, to_utc]."""

@@ -14,6 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from dateutil import tz
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from .links import build_meeting_deep_link, meeting_channel_cta_keyboard
 from .storage import Database
 from .models import Meeting, User
 from .utils import ensure_utc
@@ -69,7 +70,15 @@ def _covered_by_future_announcement(meeting_date: date, today: date, announce_da
     return False
 
 
-def _format_meeting_card(meeting: Meeting, confirmed: int, hosts: int, host: User | None, local_tz) -> str:
+def _format_meeting_card(
+    meeting: Meeting,
+    confirmed: int,
+    hosts: int,
+    host: User | None,
+    local_tz,
+    *,
+    deep_link: str | None = None,
+) -> str:
     """Format a single meeting as a rich text card (HTML)."""
     when_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
     lines = [
@@ -80,6 +89,8 @@ def _format_meeting_card(meeting: Meeting, confirmed: int, hosts: int, host: Use
     ]
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
+    if deep_link:
+        lines.append(f'👉 <a href="{deep_link}">Записаться / Подробности</a>')
     return "\n".join(line for line in lines if line)
 
 
@@ -149,10 +160,11 @@ class BotScheduler:
         self,
         db: Database,
         timezone,
-        send_channel_card: Callable[[int, str, str | None], Awaitable[None]],
+        send_channel_card: Callable[..., Awaitable[None]],
         *,
         bot: Bot | None = None,
         notify_threshold: int = 10,
+        bot_username: str | None = None,
     ):
         self.db = db
         self.scheduler = AsyncIOScheduler(timezone=timezone)
@@ -160,6 +172,7 @@ class BotScheduler:
         self._send_channel_card = send_channel_card
         self._bot = bot
         self._notify_threshold = notify_threshold
+        self._bot_username = bot_username
         self._announce_days: list[int] = [1, 15]
         self._channel_id: int | None = None
         self._pending_events: dict[int, list[_ParticipantEvent]] = defaultdict(list)
@@ -173,6 +186,28 @@ class BotScheduler:
         """Stop the scheduler without waiting for running jobs."""
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
+
+    def _meeting_deep_link(self, meeting: Meeting) -> str | None:
+        """Build a meeting deep link for channel announcements, if configured."""
+        if not self._bot_username or not meeting.public_token:
+            if self._channel_id:
+                log.warning(
+                    "Skipping meeting deep-link for meeting %s: bot username or public_token missing",
+                    meeting.id,
+                )
+            return None
+        try:
+            return build_meeting_deep_link(self._bot_username, meeting.public_token)
+        except ValueError:
+            log.warning("Skipping meeting deep-link for meeting %s: invalid public_token", meeting.id)
+            return None
+
+    def _meeting_cta_keyboard(self, meeting: Meeting) -> InlineKeyboardMarkup | None:
+        """Build a channel CTA button for a single-meeting post."""
+        deep_link = self._meeting_deep_link(meeting)
+        if not deep_link:
+            return None
+        return meeting_channel_cta_keyboard(deep_link)
 
     def schedule_daily_reminders(self, t: time, channel_id: int | None) -> None:
         """Schedule a daily job to announce meetings happening today."""
@@ -196,7 +231,10 @@ class BotScheduler:
         for meeting in meetings:
             participants = await self.db.count_confirmed(meeting.id)
             await self._send_channel_card(
-                channel_id, _format_today_card(meeting, participants, self._tz), meeting.photo_file_id
+                channel_id,
+                _format_today_card(meeting, participants, self._tz),
+                meeting.photo_file_id,
+                reply_markup=self._meeting_cta_keyboard(meeting),
             )
 
     def schedule_announcements(self, days: list[int], t: time, channel_id: int | None) -> None:
@@ -241,7 +279,11 @@ class BotScheduler:
             confirmed = await self.db.count_confirmed(m.id)
             hosts = await self.db.count_hosts(m.id)
             host = await self.db.get_user(m.created_by)
-            cards.append(_format_meeting_card(m, confirmed, hosts, host, self._tz))
+            cards.append(
+                _format_meeting_card(
+                    m, confirmed, hosts, host, self._tz, deep_link=self._meeting_deep_link(m)
+                )
+            )
 
         for message in _split_messages(header, cards):
             await self._send_channel_card(channel_id, message, None)
@@ -352,4 +394,5 @@ class BotScheduler:
             self._channel_id,
             _format_new_meeting_card(meeting, participants, self._tz),
             meeting.photo_file_id,
+            reply_markup=self._meeting_cta_keyboard(meeting),
         )

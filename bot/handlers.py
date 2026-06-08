@@ -19,6 +19,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from .config import Settings
+from .links import parse_start_payload
 from .models import Meeting, User, RegistrationStatus
 from .storage import Database
 from .scheduler import BotScheduler
@@ -80,6 +81,7 @@ class BotApp:
         self.db = db
         self.scheduler = scheduler
         self.local_tz = tz.gettz(settings.tz)
+        self.bot_username: str | None = settings.telegram_bot_username
 
     def build(self) -> Application:
         """Create and configure the PTB Application with command handlers."""
@@ -102,6 +104,7 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_leave_meeting, pattern=r"^leave:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_leave_abort, pattern=r"^leave_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_show_upcoming, pattern=r"^show_upcoming$"))
 
         # Lifecycle hooks to start/stop scheduler
         async def on_start(_: Application) -> None:
@@ -247,6 +250,106 @@ class BotApp:
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
             ]
         return InlineKeyboardMarkup([buttons])
+
+    def _upcoming_meetings_fallback_keyboard(self) -> InlineKeyboardMarkup:
+        """Keyboard shown when a meeting deep link cannot be opened."""
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(text="Все предстоящие встречи", callback_data="show_upcoming"),
+        ]])
+
+    async def _format_upcoming_meeting_summary(self, meeting: Meeting) -> tuple[str, int, int, int]:
+        """Build the list-entry text and seat counts for an upcoming meeting."""
+        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        host_name = await self.db.get_user_name(meeting.created_by) or "Unknown"
+        confirmed = await self.db.count_confirmed(meeting.id)
+        hosts = await self.db.count_hosts(meeting.id)
+        available = max(meeting.max_participants - confirmed, 0)
+        text = (
+            f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
+            f"<b>{meeting.topic}</b>\n"
+            f"Ведет: {host_name}\n"
+            f"📍 {meeting.location or 'TBA'}\n"
+            f"Свободных мест: {available} (+ведущих: {hosts})"
+        )
+        return text, available, confirmed, hosts
+
+    async def _send_upcoming_meeting_entry(
+        self,
+        message,
+        meeting: Meeting,
+        user_id: int | None,
+        *,
+        include_register: bool = True,
+    ) -> None:
+        """Send one upcoming-meeting card with contextual action buttons."""
+        text, available, _, _ = await self._format_upcoming_meeting_summary(meeting)
+        is_participant = user_id is not None and await self.db.is_registered(meeting.id, user_id)
+        keyboard = self._build_meeting_actions_keyboard(
+            meeting.id,
+            user_id,
+            meeting.created_by,
+            include_register=include_register,
+            is_participant=is_participant,
+            available=available,
+        )
+        await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+    async def _send_welcome_message(self, message) -> None:
+        """Send the default /start welcome text."""
+        msg = (
+            "🌸 Добро пожаловать в GirlTalkBot! 🌸\n\n"
+            "Я помогаю комьюнити Girl Talk легко создавать и вести встречи.\n\n"
+            "Доступные команды:\n"
+            "📝 /create_meeting — создать встречу topic | description | YYYY-MM-DD HH:MM | max | location\n"
+            "📅 /upcoming_meetings — все события\n"
+            "📗 /my_meetings — мои встречи\n"
+            "❓ /help — показать помощь\n\n"
+            "👉 Не забудь вступить в <a href='https://t.me/+8D9imfRpZDAxMDdi'>канал с анонсами</a> 👈\n\n"
+            "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
+            "Давай делать вместе организацию встреч проще! ✨"
+        )
+        await message.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    async def _handle_meeting_deep_link(self, update: Update, public_token: str) -> None:
+        """Open a meeting from a channel deep link."""
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not user:
+            return
+
+        try:
+            meeting = await self.db.get_meeting_by_public_token(public_token)
+        except Exception:
+            logger.exception("Failed to load meeting by public token")
+            await message.reply_text(
+                "Не удалось открыть встречу. Попробуй позже или посмотри все предстоящие встречи.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return
+
+        if not meeting:
+            await message.reply_text(
+                "Встреча не найдена. Возможно, ссылка устарела.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return
+
+        if meeting.canceled_at is not None:
+            await message.reply_text(
+                "Эта встреча отменена и больше недоступна.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return
+
+        now_utc = datetime.now(tz.UTC)
+        if ensure_utc(meeting.start_at_utc) < now_utc:
+            await message.reply_text(
+                "Эта встреча уже прошла.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return
+
+        await self._send_upcoming_meeting_entry(message, meeting, user.id, include_register=True)
 
     @staticmethod
     def _format_participant_list(meeting: Meeting, rows, max_participants: int) -> str:
@@ -1117,53 +1220,58 @@ class BotApp:
         if not user:
             return
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        # TODO change welcome message
-        msg = (
-            "🌸 Добро пожаловать в GirlTalkBot! 🌸\n\n"
-            "Я помогаю комьюнити Girl Talk легко создавать и вести встречи.\n\n"
-            "Доступные команды:\n"
-            "📝 /create_meeting — создать встречу topic | description | YYYY-MM-DD HH:MM | max | location\n"
-            "📅 /upcoming_meetings — все события\n"
-            "📗 /my_meetings — мои встречи\n"
-            "❓ /help — показать помощь\n\n"
-            "👉 Не забудь вступить в <a href='https://t.me/+8D9imfRpZDAxMDdi'>канал с анонсами</a> 👈\n\n"
-            "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
-            "Давай делать вместе организацию встреч проще! ✨"
-        )
-        await update.effective_message.reply_text(
-            msg,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
-        )
+        message = update.effective_message
+        if not message:
+            return
+
+        if context.args:
+            raw_payload = context.args[0] if len(context.args) == 1 else " ".join(context.args)
+            payload = parse_start_payload(raw_payload)
+            if payload.type == "meeting" and payload.public_token:
+                await self._handle_meeting_deep_link(update, payload.public_token)
+                return
+            if raw_payload.startswith("m_"):
+                await message.reply_text(
+                    "Неверная ссылка на встречу.",
+                    reply_markup=self._upcoming_meetings_fallback_keyboard(),
+                )
+                return
+
+        await self._send_welcome_message(message)
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List all upcoming meetings with register/details buttons."""
         user = update.effective_user
+        message = update.effective_message
+        if not message:
+            return
         now_utc = datetime.now(tz.UTC)
         meetings = await self.db.list_upcoming_meetings(now_utc)
         if not meetings:
-            await update.effective_message.reply_text("No upcoming meetings.")
+            await message.reply_text("No upcoming meetings.")
             return
 
         for m in meetings:
-            when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
-            host_name = await self.db.get_user_name(m.created_by) or "Unknown"
-            confirmed = await self.db.count_confirmed(m.id)
-            hosts = await self.db.count_hosts(m.id)
-            available = max(m.max_participants - confirmed, 0)
-            is_participant = user is not None and await self.db.is_registered(m.id, user.id)
-            text = (
-                f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
-                f"<b>{m.topic}</b>\n"
-                f"Ведет: {host_name}\n"
-                f"📍 {m.location or 'TBA'}\n"
-                f"Свободных мест: {available} (+ведущих: {hosts})"
+            await self._send_upcoming_meeting_entry(
+                message, m, user.id if user else None, include_register=True
             )
-            keyboard = self._build_meeting_actions_keyboard(
-                m.id, user.id if user else None, m.created_by,
-                include_register=True, is_participant=is_participant, available=available,
+
+    async def cb_show_upcoming(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline button to list all upcoming meetings."""
+        cq = update.callback_query
+        if not cq or not cq.message:
+            return
+        await cq.answer()
+        user = update.effective_user
+        now_utc = datetime.now(tz.UTC)
+        meetings = await self.db.list_upcoming_meetings(now_utc)
+        if not meetings:
+            await cq.message.reply_text("No upcoming meetings.")
+            return
+        for m in meetings:
+            await self._send_upcoming_meeting_entry(
+                cq.message, m, user.id if user else None, include_register=True
             )
-            await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_my(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List upcoming meetings the user is registered for."""
