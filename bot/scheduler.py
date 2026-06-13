@@ -6,7 +6,8 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Callable, Awaitable, Literal, Sequence
+from datetime import timezone as dt_timezone
+from typing import Callable, Awaitable, Literal, Sequence, TYPE_CHECKING
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -18,6 +19,9 @@ from .links import build_meeting_deep_link, meeting_channel_cta_keyboard
 from .storage import Database
 from .models import Meeting, User
 from .utils import ensure_utc
+
+if TYPE_CHECKING:
+    from .waitlist import WaitlistService
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +169,7 @@ class BotScheduler:
         bot: Bot | None = None,
         notify_threshold: int = 10,
         bot_username: str | None = None,
+        waitlist_service: "WaitlistService | None" = None,
     ):
         self.db = db
         self.scheduler = AsyncIOScheduler(timezone=timezone)
@@ -173,6 +178,7 @@ class BotScheduler:
         self._bot = bot
         self._notify_threshold = notify_threshold
         self._bot_username = bot_username
+        self._waitlist_service = waitlist_service
         self._announce_days: list[int] = [1, 15]
         self._channel_id: int | None = None
         self._pending_events: dict[int, list[_ParticipantEvent]] = defaultdict(list)
@@ -298,6 +304,27 @@ class BotScheduler:
             id="host_notifications_flush",
             replace_existing=True,
         )
+
+    def schedule_waitlist_expiration(self, interval_minutes: int) -> None:
+        """Register a periodic job to expire stale waitlist offers."""
+        if not self._bot or not self._waitlist_service:
+            return
+        self.scheduler.add_job(
+            self._waitlist_expiration_job,
+            trigger=IntervalTrigger(minutes=interval_minutes),
+            id="waitlist_expiration_job",
+            replace_existing=True,
+        )
+
+    async def _waitlist_expiration_job(self) -> None:
+        from .waitlist import send_expired_notices, send_offer_dms
+
+        if not self._bot or not self._waitlist_service:
+            return
+        now_utc = datetime.now(dt_timezone.utc)
+        expired, offers = await self._waitlist_service.expire_stale_offers(now_utc)
+        await send_expired_notices(self._bot, self._waitlist_service, expired)
+        await send_offer_dms(self._bot, self._waitlist_service, offers)
 
     async def on_participant_change(
         self,
