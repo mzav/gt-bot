@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Sequence
 
@@ -15,9 +15,18 @@ from sqlalchemy import select, func
 from sqlalchemy.engine import Row
 
 from .links import generate_meeting_public_token
+from .messages import REGISTRATION_SUCCESS
 from .models import Base, User, Meeting, Registration, RegistrationStatus, WaitlistEntry, WaitlistStatus
+from .utils import ensure_utc
 
 log = logging.getLogger(__name__)
+
+
+def is_registration_open(meeting: Meeting, now_utc: datetime) -> bool:
+    """Return True when non-host users may register for the meeting."""
+    if meeting.registration_starts_at_utc is None:
+        return True
+    return ensure_utc(meeting.registration_starts_at_utc) <= ensure_utc(now_utc)
 
 
 def _ensure_db_dir(url: str) -> None:
@@ -88,9 +97,19 @@ class Database:
         return updated
 
     # Meetings
-    async def create_meeting(self, *, host_id: int, topic: str, description: str, start_at_utc: datetime,
-                              max_participants: int, location: str | None,
-                              photo_file_id: str | None = None) -> Meeting:
+    async def create_meeting(
+        self,
+        *,
+        host_id: int,
+        topic: str,
+        description: str,
+        start_at_utc: datetime,
+        max_participants: int,
+        location: str | None,
+        photo_file_id: str | None = None,
+        end_at_utc: datetime | None = None,
+        registration_starts_at_utc: datetime | None = None,
+    ) -> Meeting:
         """Create a new meeting and register the host (is_host=True, doesn't count against max)."""
         async with self.session() as s:
             public_token = await self._generate_unique_public_token(s)
@@ -98,6 +117,8 @@ class Database:
                 topic=topic,
                 description=description,
                 start_at_utc=start_at_utc,
+                end_at_utc=end_at_utc,
+                registration_starts_at_utc=registration_starts_at_utc,
                 max_participants=max_participants,
                 location=location,
                 photo_file_id=photo_file_id,
@@ -145,6 +166,19 @@ class Database:
                 select(Meeting).where(Meeting.canceled_at.is_(None), Meeting.start_at_utc >= now_utc).order_by(Meeting.start_at_utc.asc())
             )
             return res.scalars().all()
+
+    async def list_upcoming_meetings_visible(
+        self, now_utc: datetime, viewer_user_id: int | None = None
+    ) -> Sequence[Meeting]:
+        """List upcoming meetings visible to a viewer (registration-gated for non-hosts)."""
+        meetings = await self.list_upcoming_meetings(now_utc)
+        visible: list[Meeting] = []
+        for meeting in meetings:
+            if viewer_user_id is not None and meeting.created_by == viewer_user_id:
+                visible.append(meeting)
+            elif is_registration_open(meeting, now_utc):
+                visible.append(meeting)
+        return visible
 
     async def list_user_meetings(self, user_id: int, now_utc: datetime) -> Sequence[Meeting]:
         """List upcoming meetings the given user is confirmed to attend (or host)."""
@@ -254,7 +288,13 @@ class Database:
             )
             return res.all()
 
-    async def register(self, meeting_id: int, user_id: int) -> tuple[bool, str, str | None]:
+    async def register(
+        self,
+        meeting_id: int,
+        user_id: int,
+        *,
+        local_tz=None,
+    ) -> tuple[bool, str, str | None]:
         """Register a user for a meeting when spots are available.
 
         Returns:
@@ -264,6 +304,18 @@ class Database:
             m = await s.get(Meeting, meeting_id)
             if m is None or m.canceled_at is not None:
                 return False, "Meeting not found or canceled.", None
+            now_utc = datetime.now(timezone.utc)
+            if not is_registration_open(m, now_utc):
+                tz_obj = local_tz
+                if tz_obj is None:
+                    from dateutil import tz as dateutil_tz
+                    tz_obj = dateutil_tz.gettz("Europe/Berlin")
+                when = ensure_utc(m.registration_starts_at_utc).astimezone(tz_obj)
+                return (
+                    False,
+                    f"Регистрация откроется {when:%d.%m.%Y %H:%M}.",
+                    None,
+                )
             res = await s.execute(
                 select(Registration).where(
                     Registration.meeting_id == meeting_id,
@@ -284,7 +336,7 @@ class Database:
             )
             s.add(reg)
             await s.commit()
-            return True, "Registered successfully.", RegistrationStatus.CONFIRMED
+            return True, REGISTRATION_SUCCESS, RegistrationStatus.CONFIRMED
 
     async def is_registered(self, meeting_id: int, user_id: int) -> bool:
         """Check if user has an active confirmed registration."""
@@ -343,12 +395,15 @@ class Database:
         topic: str | None = None,
         description: str | None = None,
         start_at_utc: datetime | None = None,
+        end_at_utc: datetime | None = None,
+        registration_starts_at_utc: datetime | None = None,
         max_participants: int | None = None,
         location: str | None = None,
         photo_file_id: str | None = None,
         *,
         clear_location: bool = False,
         clear_photo: bool = False,
+        clear_registration_start: bool = False,
     ) -> Meeting | None:
         """Update meeting fields. Only provided values are updated.
 
@@ -364,6 +419,12 @@ class Database:
                 m.description = description
             if start_at_utc is not None:
                 m.start_at_utc = start_at_utc
+            if end_at_utc is not None:
+                m.end_at_utc = end_at_utc
+            if clear_registration_start:
+                m.registration_starts_at_utc = None
+            elif registration_starts_at_utc is not None:
+                m.registration_starts_at_utc = registration_starts_at_utc
             if max_participants is not None:
                 m.max_participants = max_participants
             if clear_location:

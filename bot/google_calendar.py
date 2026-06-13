@@ -33,6 +33,12 @@ GCAL_UPDATE_REMINDER_RU = (
 GCAL_BUTTON_LABEL_EN = "Add to Google Calendar"
 GCAL_BUTTON_LABEL_RU = "Добавить в Google Calendar"
 
+def effective_end_at_utc(meeting: Meeting) -> datetime:
+    """Return meeting end time, falling back to start + default duration."""
+    if meeting.end_at_utc:
+        return ensure_utc(meeting.end_at_utc)
+    return ensure_utc(meeting.start_at_utc) + DEFAULT_MEETING_DURATION
+
 
 def can_offer_google_calendar(*, is_host: bool, is_participant: bool) -> bool:
     """Return True when the user may add the meeting to their calendar."""
@@ -87,7 +93,10 @@ def build_google_calendar_event_url(
         return None
 
     start_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
-    end_local = start_local + duration
+    if duration is not DEFAULT_MEETING_DURATION:
+        end_local = start_local + duration
+    else:
+        end_local = effective_end_at_utc(meeting).astimezone(local_tz)
     dates = f"{_format_gcal_local_datetime(start_local)}/{_format_gcal_local_datetime(end_local)}"
 
     params: dict[str, str] = {

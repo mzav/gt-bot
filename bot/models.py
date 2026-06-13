@@ -35,6 +35,8 @@ class Meeting(Base):
     topic: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)
     start_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    end_at_utc: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    registration_starts_at_utc: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     max_participants: Mapped[int] = mapped_column(Integer)
     location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 

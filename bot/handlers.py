@@ -30,8 +30,14 @@ from .google_calendar import (
 )
 from .links import parse_start_payload
 from .meeting_actions import resolve_meeting_actions
+from .meeting_format import format_meeting_time, format_registration_start
+from .meeting_notifications import (
+    detect_important_changes,
+    notify_participants,
+    snapshot_meeting,
+)
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
-from .storage import Database
+from .storage import Database, is_registration_open
 from .scheduler import BotScheduler
 from .waitlist import WaitlistService, OfferNotification, send_offer_dms
 from .utils import ensure_utc
@@ -85,6 +91,9 @@ class BotApp:
     STATE_HOUR = 7
     STATE_MINUTE = 8
     STATE_PHOTO = 9
+    STATE_END_HOUR = 20
+    STATE_END_MINUTE = 21
+    STATE_REG_START_CHOICE = 22
 
     # Conversation states for the edit_meeting flow
     STATE_EDIT_MENU = 10
@@ -97,6 +106,9 @@ class BotApp:
     STATE_EDIT_HOUR = 17
     STATE_EDIT_MINUTE = 18
     STATE_EDIT_PHOTO = 19
+    STATE_EDIT_END_HOUR = 23
+    STATE_EDIT_END_MINUTE = 24
+    STATE_EDIT_REG_START_CHOICE = 25
 
     def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler, waitlist: WaitlistService):
         self.settings = settings
@@ -175,6 +187,16 @@ class BotApp:
                     CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
                     CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
                 ],
+                self.STATE_END_HOUR: [
+                    CallbackQueryHandler(self._create_meeting_end_hour_callback, pattern=r"^hour:"),
+                ],
+                self.STATE_END_MINUTE: [
+                    CallbackQueryHandler(self._create_meeting_end_minute_callback, pattern=r"^time:"),
+                    CallbackQueryHandler(self._create_meeting_end_minute_callback, pattern=r"^hour:back$"),
+                ],
+                self.STATE_REG_START_CHOICE: [
+                    CallbackQueryHandler(self._create_reg_start_choice, pattern=r"^reg_start:"),
+                ],
                 self.STATE_PHOTO: [
                     MessageHandler(filters.PHOTO, self._create_meeting_photo),
                     CallbackQueryHandler(self._create_meeting_photo, pattern=r"^skip_photo$"),
@@ -196,7 +218,10 @@ class BotApp:
                     CallbackQueryHandler(self._edit_select_max, pattern=r"^edit_field:max$"),
                     CallbackQueryHandler(self._edit_select_location, pattern=r"^edit_field:location$"),
                     CallbackQueryHandler(self._edit_select_datetime, pattern=r"^edit_field:datetime$"),
+                    CallbackQueryHandler(self._edit_select_endtime, pattern=r"^edit_field:endtime$"),
+                    CallbackQueryHandler(self._edit_select_regstart, pattern=r"^edit_field:regstart$"),
                     CallbackQueryHandler(self._edit_select_photo, pattern=r"^edit_field:photo$"),
+                    CallbackQueryHandler(self._edit_reg_start_choice, pattern=r"^edit_reg_start:"),
                     CallbackQueryHandler(self._edit_done, pattern=r"^edit_field:done$"),
                 ],
                 self.STATE_EDIT_TOPIC: [
@@ -224,6 +249,16 @@ class BotApp:
                     CallbackQueryHandler(self._edit_minute_callback, pattern=r"^time:"),
                     CallbackQueryHandler(self._edit_minute_callback, pattern=r"^hour:back$"),
                 ],
+                self.STATE_EDIT_END_HOUR: [
+                    CallbackQueryHandler(self._edit_end_hour_callback, pattern=r"^hour:"),
+                ],
+                self.STATE_EDIT_END_MINUTE: [
+                    CallbackQueryHandler(self._edit_end_minute_callback, pattern=r"^time:"),
+                    CallbackQueryHandler(self._edit_end_minute_callback, pattern=r"^hour:back$"),
+                ],
+                self.STATE_EDIT_REG_START_CHOICE: [
+                    CallbackQueryHandler(self._edit_reg_start_choice, pattern=r"^edit_reg_start:"),
+                ],
                 self.STATE_EDIT_PHOTO: [
                     MessageHandler(filters.PHOTO, self._edit_photo_handler),
                     CallbackQueryHandler(self._edit_photo_handler, pattern=r"^edit_photo:"),
@@ -248,6 +283,7 @@ class BotApp:
         is_participant: bool = False,
         available: int = 1,
         waitlist_state: str | None = None,
+        registration_open: bool = True,
     ) -> InlineKeyboardMarkup:
         """Build action buttons for a meeting list entry."""
         is_host = user_id is not None and created_by == user_id
@@ -257,6 +293,7 @@ class BotApp:
             available=available,
             waitlist_state=waitlist_state,
             include_register=include_register,
+            registration_open=registration_open,
         )
         if action == "host":
             buttons = [
@@ -355,13 +392,13 @@ class BotApp:
 
     async def _format_upcoming_meeting_summary(self, meeting: Meeting) -> tuple[str, int, int, int]:
         """Build the list-entry text and seat counts for an upcoming meeting."""
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when = format_meeting_time(meeting, self.local_tz, style="iso")
         host_name = await self.db.get_user_name(meeting.created_by) or "Unknown"
         confirmed = await self.db.count_confirmed(meeting.id)
         hosts = await self.db.count_hosts(meeting.id)
         available = await self.db.available_spots(meeting.id)
         text = (
-            f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
+            f"<b>{when}</b>\n"
             f"<b>{meeting.topic}</b>\n"
             f"Ведет: {host_name}\n"
             f"📍 {meeting.location or 'TBA'}\n"
@@ -389,6 +426,8 @@ class BotApp:
     ) -> None:
         """Send one upcoming-meeting card with contextual action buttons."""
         text, available, _, _ = await self._format_upcoming_meeting_summary(meeting)
+        now_utc = datetime.now(tz.UTC)
+        reg_open = is_registration_open(meeting, now_utc)
         _, is_participant, waitlist_state = await self._get_meeting_user_context(
             meeting.id, user_id, include_register=include_register
         )
@@ -400,6 +439,7 @@ class BotApp:
             is_participant=is_participant,
             available=available,
             waitlist_state=waitlist_state,
+            registration_open=reg_open,
         )
         await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -458,6 +498,15 @@ class BotApp:
             )
             return
 
+        is_host = meeting.created_by == user.id
+        if not is_host and not is_registration_open(meeting, now_utc):
+            when = ensure_utc(meeting.registration_starts_at_utc).astimezone(self.local_tz)
+            await message.reply_text(
+                f"Регистрация на эту встречу откроется {when:%d.%m.%Y %H:%M}.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return
+
         await self._send_upcoming_meeting_entry(message, meeting, user.id, include_register=True)
 
     @staticmethod
@@ -489,6 +538,10 @@ class BotApp:
                 InlineKeyboardButton(text="Дату и время", callback_data="edit_field:datetime"),
             ],
             [
+                InlineKeyboardButton(text="Время окончания", callback_data="edit_field:endtime"),
+                InlineKeyboardButton(text="Начало регистрации", callback_data="edit_field:regstart"),
+            ],
+            [
                 InlineKeyboardButton(text="Макс. участников", callback_data="edit_field:max"),
                 InlineKeyboardButton(text="Место", callback_data="edit_field:location"),
             ],
@@ -502,7 +555,8 @@ class BotApp:
 
     def _format_edit_menu_text(self, meeting: Meeting, notice: str = "") -> str:
         """Format the current meeting state as an edit-menu message."""
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when = format_meeting_time(meeting, self.local_tz, style="short")
+        reg_start = format_registration_start(meeting, self.local_tz)
         photo_line = "🖼 Фото: есть" if meeting.photo_file_id else "🖼 Фото: нет"
         prefix = f"{notice}\n\n" if notice else ""
         return (
@@ -510,7 +564,8 @@ class BotApp:
             f"✏️ <b>Редактирование встречи #{meeting.id}</b>\n\n"
             f"📌 Тема: {meeting.topic}\n"
             f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
+            f"📅 Дата и время: {when}\n"
+            f"🔓 Начало регистрации: {reg_start}\n"
             f"👥 Макс. участников: {meeting.max_participants}\n"
             f"📍 Место: {meeting.location or 'не указано'}\n"
             f"{photo_line}\n\n"
@@ -552,6 +607,7 @@ class BotApp:
             return ConversationHandler.END
 
         context.user_data["edit_meeting_id"] = meeting_id
+        context.user_data["edit_snapshot"] = snapshot_meeting(meeting)
         await cq.message.reply_text(
             self._format_edit_menu_text(meeting),
             reply_markup=self._build_edit_menu_keyboard(),
@@ -569,13 +625,28 @@ class BotApp:
         if meeting_id:
             meeting = await self.db.get_meeting(meeting_id)
             if meeting:
-                when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+                snapshot = context.user_data.get("edit_snapshot")
+                if snapshot and self.scheduler._bot:
+                    changes = detect_important_changes(snapshot, meeting)
+                    if changes:
+                        user = update.effective_user
+                        host_id = user.id if user else meeting.created_by
+                        await notify_participants(
+                            self.scheduler._bot,
+                            self.db,
+                            meeting,
+                            changes,
+                            exclude_user_id=host_id,
+                            local_tz=self.local_tz,
+                            bot_username=self.bot_username,
+                        )
+                when = format_meeting_time(meeting, self.local_tz, style="short")
                 photo_line = f"\n🖼 Фото: {'есть' if meeting.photo_file_id else 'нет'}"
                 text = (
                     f"✅ Редактирование встречи #{meeting_id} завершено.\n\n"
                     f"📌 Тема: {meeting.topic}\n"
                     f"📝 Описание: {meeting.description}\n"
-                    f"📅 Дата и время: {when_local:%d.%m.%Y %H:%M}\n"
+                    f"📅 Дата и время: {when}\n"
                     f"👥 Макс. участников: {meeting.max_participants}\n"
                     f"📍 Место: {meeting.location or 'не указано'}"
                     f"{photo_line}"
@@ -648,11 +719,74 @@ class BotApp:
         if not cq:
             return self.STATE_EDIT_MENU
         await cq.answer()
+        context.user_data.pop("edit_picking_reg_start", None)
         await cq.edit_message_text(
             "📅 Выбери новый месяц встречи:",
             reply_markup=MonthPickerKeyboard.build()
         )
         return self.STATE_EDIT_MONTH
+
+    async def _edit_select_endtime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        cq = update.callback_query
+        if not cq:
+            return self.STATE_EDIT_MENU
+        await cq.answer()
+
+        meeting_id = context.user_data.get("edit_meeting_id")
+        meeting = await self.db.get_meeting(meeting_id) if meeting_id else None
+        if not meeting:
+            await cq.edit_message_text("Встреча не найдена.")
+            return ConversationHandler.END
+
+        start_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        context.user_data["edit_end_date"] = start_local.date()
+        await cq.edit_message_text(
+            f"📅 Дата: {start_local:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+            reply_markup=TimePickerKeyboard.build_hours(),
+        )
+        return self.STATE_EDIT_END_HOUR
+
+    async def _edit_select_regstart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        cq = update.callback_query
+        if not cq:
+            return self.STATE_EDIT_MENU
+        await cq.answer()
+        await cq.edit_message_text(
+            "🔓 Когда открыть регистрацию?",
+            reply_markup=self._reg_start_choice_keyboard("edit_reg_start"),
+        )
+        return self.STATE_EDIT_REG_START_CHOICE
+
+    async def _edit_reg_start_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        cq = update.callback_query
+        if not cq:
+            return self.STATE_EDIT_REG_START_CHOICE
+        await cq.answer()
+
+        meeting_id = context.user_data.get("edit_meeting_id")
+        data = cq.data or ""
+
+        if data == "edit_reg_start:now":
+            meeting = await self.db.update_meeting(meeting_id, clear_registration_start=True)
+            if not meeting:
+                await cq.edit_message_text("Встреча не найдена.")
+                return ConversationHandler.END
+            await cq.edit_message_text(
+                self._format_edit_menu_text(meeting, "✅ Начало регистрации обновлено!"),
+                reply_markup=self._build_edit_menu_keyboard(),
+                parse_mode="HTML",
+            )
+            return self.STATE_EDIT_MENU
+
+        if data == "edit_reg_start:pick":
+            context.user_data["edit_picking_reg_start"] = True
+            await cq.edit_message_text(
+                "📅 Выбери месяц открытия регистрации:",
+                reply_markup=MonthPickerKeyboard.build(),
+            )
+            return self.STATE_EDIT_MONTH
+
+        return self.STATE_EDIT_REG_START_CHOICE
 
     async def _edit_select_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User selected to edit the meeting photo."""
@@ -859,9 +993,11 @@ class BotApp:
         context.user_data["edit_selected_year"] = year
         context.user_data["edit_selected_month"] = month
 
+        picking_reg = context.user_data.get("edit_picking_reg_start")
         tomorrow = date.today() + timedelta(days=1)
+        today = date.today()
         first_of_month = date(year, month, 1)
-        min_date_val = max(first_of_month, tomorrow)
+        min_date_val = max(first_of_month, today if picking_reg else tomorrow)
         if month == 12:
             max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
         else:
@@ -873,8 +1009,9 @@ class BotApp:
             min_date=min_date_val,
             max_date=max_date_val
         ).build()
+        day_label = "день открытия регистрации" if picking_reg else "новый день встречи"
         await query.edit_message_text(
-            "📅 Выбери новый день встречи:",
+            f"📅 Выбери {day_label}:",
             reply_markup=calendar
         )
         return self.STATE_EDIT_DATE
@@ -888,9 +1025,11 @@ class BotApp:
 
         year = context.user_data.get("edit_selected_year")
         month = context.user_data.get("edit_selected_month")
+        picking_reg = context.user_data.get("edit_picking_reg_start")
         tomorrow = date.today() + timedelta(days=1)
+        today = date.today()
         first_of_month = date(year, month, 1)
-        min_date_val = max(first_of_month, tomorrow)
+        min_date_val = max(first_of_month, today if picking_reg else tomorrow)
         if month == 12:
             max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
         else:
@@ -903,18 +1042,25 @@ class BotApp:
         ).process(query.data)
 
         if not result and key:
+            day_label = "день открытия регистрации" if picking_reg else "новый день встречи"
             await query.edit_message_text(
-                "📅 Выбери новый день встречи:",
+                f"📅 Выбери {day_label}:",
                 reply_markup=key
             )
             return self.STATE_EDIT_DATE
 
         if result:
             context.user_data["edit_selected_date"] = result
-            await query.edit_message_text(
-                f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                reply_markup=TimePickerKeyboard.build_hours()
-            )
+            if picking_reg:
+                await query.edit_message_text(
+                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час открытия регистрации:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+            else:
+                await query.edit_message_text(
+                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
             return self.STATE_EDIT_HOUR
 
         return self.STATE_EDIT_DATE
@@ -927,13 +1073,15 @@ class BotApp:
         await query.answer()
 
         data = query.data or ""
+        picking_reg = context.user_data.get("edit_picking_reg_start")
+        hour_label = "открытия регистрации" if picking_reg else "начала встречи"
         try:
             _, hour_str = data.split(":", 1)
             if hour_str == "back":
                 await query.edit_message_text(
                     f"📅 Дата: {context.user_data.get('edit_selected_date'):%d.%m.%Y}\n\n"
-                    "🕐 Выбери час начала встречи:",
-                    reply_markup=TimePickerKeyboard.build_hours()
+                    f"🕐 Выбери час {hour_label}:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
                 )
                 return self.STATE_EDIT_HOUR
             hour = int(hour_str)
@@ -994,15 +1142,126 @@ class BotApp:
             minute=minute,
             tzinfo=self.local_tz
         )
-        start_utc = local_dt.astimezone(tz.UTC)
+        value_utc = local_dt.astimezone(tz.UTC)
 
-        meeting = await self.db.update_meeting(meeting_id, start_at_utc=start_utc)
+        if context.user_data.get("edit_picking_reg_start"):
+            meeting = await self.db.get_meeting(meeting_id)
+            if meeting and value_utc > ensure_utc(meeting.start_at_utc):
+                await query.edit_message_text(
+                    "Время открытия регистрации не может быть позже начала встречи. "
+                    "Выбери другое время:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+                return self.STATE_EDIT_HOUR
+            meeting = await self.db.update_meeting(
+                meeting_id, registration_starts_at_utc=value_utc
+            )
+            context.user_data.pop("edit_picking_reg_start", None)
+            notice = "✅ Начало регистрации обновлено!"
+        else:
+            meeting = await self.db.update_meeting(meeting_id, start_at_utc=value_utc)
+            notice = "✅ Дата и время обновлены!"
+
         if not meeting:
             await query.edit_message_text("Встреча не найдена.")
             return ConversationHandler.END
 
         await query.edit_message_text(
-            self._format_edit_menu_text(meeting, "✅ Дата и время обновлены!"),
+            self._format_edit_menu_text(meeting, notice),
+            reply_markup=self._build_edit_menu_keyboard(),
+            parse_mode="HTML",
+        )
+        return self.STATE_EDIT_MENU
+
+    async def _edit_end_hour_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return self.STATE_EDIT_END_HOUR
+        await query.answer()
+
+        data = query.data or ""
+        edit_end_date = context.user_data.get("edit_end_date")
+        try:
+            _, hour_str = data.split(":", 1)
+            if hour_str == "back":
+                await query.edit_message_text(
+                    f"📅 Дата: {edit_end_date:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+                return self.STATE_EDIT_END_HOUR
+            hour = int(hour_str)
+        except Exception:
+            await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
+            return self.STATE_EDIT_END_HOUR
+
+        context.user_data["edit_selected_end_hour"] = hour
+        await query.edit_message_text(
+            f"📅 Дата: {edit_end_date:%d.%m.%Y}\n"
+            f"🕐 Час окончания: {hour:02d}:00\n\n"
+            "⏱ Выбери минуты:",
+            reply_markup=TimePickerKeyboard.build_minutes(hour),
+        )
+        return self.STATE_EDIT_END_MINUTE
+
+    async def _edit_end_minute_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return self.STATE_EDIT_END_MINUTE
+        await query.answer()
+
+        data = query.data or ""
+        edit_end_date = context.user_data.get("edit_end_date")
+        meeting_id = context.user_data.get("edit_meeting_id")
+
+        if data == "hour:back":
+            await query.edit_message_text(
+                f"📅 Дата: {edit_end_date:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
+            return self.STATE_EDIT_END_HOUR
+
+        try:
+            _, hour_str, minute_str = data.split(":")
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except Exception:
+            await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
+            return self.STATE_EDIT_END_MINUTE
+
+        if not edit_end_date or not meeting_id:
+            await query.edit_message_text("Сессия истекла. Начни редактирование заново.")
+            return ConversationHandler.END
+
+        end_local = datetime(
+            year=edit_end_date.year,
+            month=edit_end_date.month,
+            day=edit_end_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=self.local_tz,
+        )
+        meeting = await self.db.get_meeting(meeting_id)
+        if not meeting:
+            await query.edit_message_text("Встреча не найдена.")
+            return ConversationHandler.END
+
+        start_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        if end_local <= start_local:
+            await query.edit_message_text(
+                "Время окончания должно быть позже начала. Выбери другое время:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
+            return self.STATE_EDIT_END_HOUR
+
+        meeting = await self.db.update_meeting(
+            meeting_id, end_at_utc=end_local.astimezone(tz.UTC)
+        )
+        if not meeting:
+            await query.edit_message_text("Встреча не найдена.")
+            return ConversationHandler.END
+
+        await query.edit_message_text(
+            self._format_edit_menu_text(meeting, "✅ Время окончания обновлено!"),
             reply_markup=self._build_edit_menu_keyboard(),
             parse_mode="HTML",
         )
@@ -1090,10 +1349,11 @@ class BotApp:
         context.user_data["selected_month"] = month
 
         # Calculate min and max dates for the calendar (only selected month)
+        picking_reg = context.user_data.get("picking_reg_start")
         tomorrow = date.today() + timedelta(days=1)
+        today = date.today()
         first_of_month = date(year, month, 1)
-        # min_date: first of selected month, but not before tomorrow
-        min_date_val = max(first_of_month, tomorrow)
+        min_date_val = max(first_of_month, today if picking_reg else tomorrow)
         # max_date: last day of selected month
         if month == 12:
             max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
@@ -1107,8 +1367,9 @@ class BotApp:
             min_date=min_date_val,
             max_date=max_date_val
         ).build()
+        day_label = "день открытия регистрации" if picking_reg else "день встречи"
         await query.edit_message_text(
-            f"📅 Выбери день встречи:",
+            f"📅 Выбери {day_label}:",
             reply_markup=calendar
         )
         return self.STATE_DATE
@@ -1123,9 +1384,11 @@ class BotApp:
         # Reconstruct date constraints for the selected month
         year = context.user_data.get("selected_year")
         month = context.user_data.get("selected_month")
+        picking_reg = context.user_data.get("picking_reg_start")
         tomorrow = date.today() + timedelta(days=1)
+        today = date.today()
         first_of_month = date(year, month, 1)
-        min_date_val = max(first_of_month, tomorrow)
+        min_date_val = max(first_of_month, today if picking_reg else tomorrow)
         if month == 12:
             max_date_val = date(year + 1, 1, 1) - timedelta(days=1)
         else:
@@ -1138,20 +1401,25 @@ class BotApp:
         ).process(query.data)
 
         if not result and key:
-            # User is still navigating the calendar
+            day_label = "день открытия регистрации" if picking_reg else "день встречи"
             await query.edit_message_text(
-                f"📅 Выбери день встречи:",
+                f"📅 Выбери {day_label}:",
                 reply_markup=key
             )
             return self.STATE_DATE
 
         if result:
-            # Date selected, store it and show hour picker
             context.user_data["selected_date"] = result
-            await query.edit_message_text(
-                f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                reply_markup=TimePickerKeyboard.build_hours()
-            )
+            if picking_reg:
+                await query.edit_message_text(
+                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час открытия регистрации:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+            else:
+                await query.edit_message_text(
+                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
             return self.STATE_HOUR
 
         return self.STATE_DATE
@@ -1164,14 +1432,15 @@ class BotApp:
         await query.answer()
 
         data = query.data or ""
+        picking_reg = context.user_data.get("picking_reg_start")
+        hour_label = "открытия регистрации" if picking_reg else "начала встречи"
         try:
             _, hour_str = data.split(":", 1)
             if hour_str == "back":
-                # User wants to go back to hour selection - already here, just refresh
                 await query.edit_message_text(
                     f"📅 Дата: {context.user_data.get('selected_date'):%d.%m.%Y}\n\n"
-                    "🕐 Выбери час начала встречи:",
-                    reply_markup=TimePickerKeyboard.build_hours()
+                    f"🕐 Выбери час {hour_label}:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
                 )
                 return self.STATE_HOUR
             hour = int(hour_str)
@@ -1231,13 +1500,146 @@ class BotApp:
             minute=minute,
             tzinfo=self.local_tz
         )
+
+        if context.user_data.get("picking_reg_start"):
+            start_utc = context.user_data.get("selected_start_utc")
+            reg_utc = local_dt.astimezone(tz.UTC)
+            if start_utc and reg_utc > start_utc:
+                await query.edit_message_text(
+                    "Время открытия регистрации не может быть позже начала встречи. "
+                    "Выбери другое время:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+                return self.STATE_HOUR
+            context.user_data["selected_reg_start_utc"] = reg_utc
+            context.user_data.pop("picking_reg_start", None)
+            await query.edit_message_text(
+                "📸 Хочешь добавить фото к встрече? (необязательно)\n"
+                "Отправь фото или нажми «Пропустить».",
+                reply_markup=photo_skip_keyboard(),
+            )
+            return self.STATE_PHOTO
+
         context.user_data["selected_start_utc"] = local_dt.astimezone(tz.UTC)
         await query.edit_message_text(
-            "📸 Хочешь добавить фото к встрече? (необязательно)\n"
-            "Отправь фото или нажми «Пропустить».",
-            reply_markup=photo_skip_keyboard(),
+            f"📅 Дата: {selected_date:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+            reply_markup=TimePickerKeyboard.build_hours(),
         )
-        return self.STATE_PHOTO
+        return self.STATE_END_HOUR
+
+    async def _create_meeting_end_hour_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return self.STATE_END_HOUR
+        await query.answer()
+
+        data = query.data or ""
+        selected_date = context.user_data.get("selected_date")
+        try:
+            _, hour_str = data.split(":", 1)
+            if hour_str == "back":
+                await query.edit_message_text(
+                    f"📅 Дата: {selected_date:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+                    reply_markup=TimePickerKeyboard.build_hours(),
+                )
+                return self.STATE_END_HOUR
+            hour = int(hour_str)
+        except Exception:
+            await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
+            return self.STATE_END_HOUR
+
+        context.user_data["selected_end_hour"] = hour
+        await query.edit_message_text(
+            f"📅 Дата: {selected_date:%d.%m.%Y}\n"
+            f"🕐 Час окончания: {hour:02d}:00\n\n"
+            "⏱ Выбери минуты:",
+            reply_markup=TimePickerKeyboard.build_minutes(hour),
+        )
+        return self.STATE_END_MINUTE
+
+    async def _create_meeting_end_minute_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return self.STATE_END_MINUTE
+        await query.answer()
+
+        data = query.data or ""
+        if data == "hour:back":
+            selected_date = context.user_data.get("selected_date")
+            await query.edit_message_text(
+                f"📅 Дата: {selected_date:%d.%m.%Y}\n\n🕐 Выбери час окончания встречи:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
+            return self.STATE_END_HOUR
+
+        try:
+            _, hour_str, minute_str = data.split(":")
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except Exception:
+            await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
+            return self.STATE_END_MINUTE
+
+        selected_date = context.user_data.get("selected_date")
+        start_utc = context.user_data.get("selected_start_utc")
+        if not selected_date or not start_utc:
+            await query.edit_message_text("Ошибка: дата не выбрана. Начни заново с /create_meeting")
+            return ConversationHandler.END
+
+        end_local = datetime(
+            year=selected_date.year,
+            month=selected_date.month,
+            day=selected_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=self.local_tz,
+        )
+        start_local = ensure_utc(start_utc).astimezone(self.local_tz)
+        if end_local <= start_local:
+            await query.edit_message_text(
+                "Время окончания должно быть позже начала. Выбери другое время:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
+            return self.STATE_END_HOUR
+
+        context.user_data["selected_end_utc"] = end_local.astimezone(tz.UTC)
+        await query.edit_message_text(
+            "🔓 Когда открыть регистрацию?",
+            reply_markup=self._reg_start_choice_keyboard("reg_start"),
+        )
+        return self.STATE_REG_START_CHOICE
+
+    def _reg_start_choice_keyboard(self, prefix: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(text="Сразу", callback_data=f"{prefix}:now"),
+            InlineKeyboardButton(text="Выбрать дату", callback_data=f"{prefix}:pick"),
+        ]])
+
+    async def _create_reg_start_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return self.STATE_REG_START_CHOICE
+        await query.answer()
+
+        data = query.data or ""
+        if data == "reg_start:now":
+            context.user_data["selected_reg_start_utc"] = None
+            await query.edit_message_text(
+                "📸 Хочешь добавить фото к встрече? (необязательно)\n"
+                "Отправь фото или нажми «Пропустить».",
+                reply_markup=photo_skip_keyboard(),
+            )
+            return self.STATE_PHOTO
+
+        if data == "reg_start:pick":
+            context.user_data["picking_reg_start"] = True
+            await query.edit_message_text(
+                "📅 Выбери месяц открытия регистрации:",
+                reply_markup=MonthPickerKeyboard.build(),
+            )
+            return self.STATE_MONTH
+
+        return self.STATE_REG_START_CHOICE
 
     async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
@@ -1263,6 +1665,10 @@ class BotApp:
         max_participants = context.user_data.get("max_participants")
         location = context.user_data.get("location")
 
+        start_utc = context.user_data.get("selected_start_utc")
+        end_utc = context.user_data.get("selected_end_utc")
+        reg_start_utc = context.user_data.get("selected_reg_start_utc")
+
         if not all([start_utc, topic, description, max_participants]):
             target = cq.message if cq else update.message
             await target.reply_text("Произошла ошибка. Начни заново с /create_meeting")
@@ -1275,13 +1681,15 @@ class BotApp:
             topic=topic,
             description=description,
             start_at_utc=start_utc,
+            end_at_utc=end_utc,
+            registration_starts_at_utc=reg_start_utc,
             max_participants=max_participants,
             location=location,
             photo_file_id=photo_file_id,
         )
         await self.scheduler.maybe_announce_new_meeting(meeting)
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when = format_meeting_time(meeting, self.local_tz, style="short")
         photo_line = "\n🖼 Фото: прикреплено" if photo_file_id else ""
         calendar_keyboard = self._google_calendar_keyboard(meeting, lang="ru")
         disclaimer = f"\n\n{gcal_disclaimer('ru')}" if calendar_keyboard else ""
@@ -1289,7 +1697,7 @@ class BotApp:
             "✅ Спасибо! Встреча создана.\n\n"
             f"📌 Название: {meeting.topic}\n"
             f"📝 Описание: {meeting.description}\n"
-            f"📅 Дата и время (Берлин): {when_local:%d.%m.%Y %H:%M}\n"
+            f"📅 Дата и время (Берлин): {when}\n"
             f"📍 Место: {meeting.location or 'не указано'}\n"
             f"👥 Максимум участников: {meeting.max_participants}"
             f"{photo_line}\n"
@@ -1359,7 +1767,9 @@ class BotApp:
         if not message:
             return
         now_utc = datetime.now(tz.UTC)
-        meetings = await self.db.list_upcoming_meetings(now_utc)
+        meetings = await self.db.list_upcoming_meetings_visible(
+            now_utc, user.id if user else None
+        )
         if not meetings:
             await message.reply_text("No upcoming meetings.")
             return
@@ -1377,7 +1787,9 @@ class BotApp:
         await cq.answer()
         user = update.effective_user
         now_utc = datetime.now(tz.UTC)
-        meetings = await self.db.list_upcoming_meetings(now_utc)
+        meetings = await self.db.list_upcoming_meetings_visible(
+            now_utc, user.id if user else None
+        )
         if not meetings:
             await cq.message.reply_text("No upcoming meetings.")
             return
@@ -1399,13 +1811,13 @@ class BotApp:
             return
 
         for m in meetings:
-            when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
+            when = format_meeting_time(m, self.local_tz, style="iso")
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             hosts = await self.db.count_hosts(m.id)
             available = await self.db.available_spots(m.id)
             text = (
-                f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
+                f"<b>{when}</b>\n"
                 f"<b>{m.topic}</b>\n"
                 f"Ведет: {host_name}\n"
                 f"📍 {m.location or 'TBA'}\n"
@@ -1428,7 +1840,9 @@ class BotApp:
         except Exception:
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
-        ok, msg, reg_status = await self.db.register(meeting_id, user.id)
+        ok, msg, reg_status = await self.db.register(
+            meeting_id, user.id, local_tz=self.local_tz
+        )
         await update.effective_message.reply_text(msg)
         if ok and reg_status == RegistrationStatus.CONFIRMED:
             meeting = await self.db.get_meeting(meeting_id)
@@ -1481,7 +1895,9 @@ class BotApp:
         except Exception:
             await cq.message.reply_text("Invalid registration request.")
             return
-        ok, msg, reg_status = await self.db.register(meeting_id, user.id)
+        ok, msg, reg_status = await self.db.register(
+            meeting_id, user.id, local_tz=self.local_tz
+        )
         await cq.message.reply_text(msg)
         if ok and reg_status == RegistrationStatus.CONFIRMED:
             meeting = await self.db.get_meeting(meeting_id)
@@ -1509,9 +1925,8 @@ class BotApp:
             await cq.message.reply_text("Meeting not found.")
             return
 
-        when_local = ensure_utc(m.start_at_utc).astimezone(self.local_tz)
-        date_str = when_local.strftime("%A, %d %B %Y")
-        time_str = when_local.strftime("%H:%M")
+        date_str = format_meeting_time(m, self.local_tz, style="details_date")
+        time_str = format_meeting_time(m, self.local_tz, style="details_time")
 
         host_user = await self.db.get_user(m.created_by)
         if host_user:
@@ -1531,7 +1946,7 @@ class BotApp:
             f"<b>{m.topic}</b>\n"
             f"📝  {m.description}\n\n\n"
             f"📅 Date: {date_str}\n"
-            f"🕐 Time: {time_str} (Berlin time)\n"
+            f"🕐 Time: {time_str}\n"
             f"📍 Location {m.location or 'TBA'}\n"
             f"👤 Ведет: {host_display}\n"
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
@@ -1617,7 +2032,7 @@ class BotApp:
             await cq.message.reply_text("Эта встреча уже отменена.")
             return
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when = format_meeting_time(meeting, self.local_tz, style="short")
         confirmed = await self.db.count_confirmed(meeting.id)
 
         confirmation_keyboard = InlineKeyboardMarkup([
@@ -1630,7 +2045,7 @@ class BotApp:
         text = (
             f"⚠️ <b>Отмена встречи #{meeting_id}</b>\n\n"
             f"📌 {meeting.topic}\n"
-            f"📅 {when_local:%d.%m.%Y %H:%M}\n"
+            f"📅 {when}\n"
             f"👥 Зарегистрировано участников: {confirmed}\n\n"
             "Ты уверен(а), что хочешь отменить эту встречу?\n"
             "Это действие нельзя отменить."
@@ -1674,11 +2089,22 @@ class BotApp:
             await cq.edit_message_text("Ошибка при отмене встречи.")
             return
 
-        when_local = ensure_utc(canceled_meeting.start_at_utc).astimezone(self.local_tz)
+        if self.scheduler._bot:
+            await notify_participants(
+                self.scheduler._bot,
+                self.db,
+                canceled_meeting,
+                ["встреча отменена"],
+                exclude_user_id=user.id,
+                local_tz=self.local_tz,
+                bot_username=self.bot_username,
+            )
+
+        when = format_meeting_time(canceled_meeting, self.local_tz, style="short")
         text = (
             f"🚫 <b>Встреча отменена</b>\n\n"
             f"📌 {canceled_meeting.topic}\n"
-            f"📅 {when_local:%d.%m.%Y %H:%M}\n\n"
+            f"📅 {when}\n\n"
             "Встреча успешно отменена."
             f"{gcal_update_reminder('ru')}"
         )
@@ -1729,7 +2155,7 @@ class BotApp:
             await cq.message.reply_text("Ты не зарегистрирован(а) на эту встречу.")
             return
 
-        when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
+        when = format_meeting_time(meeting, self.local_tz, style="short")
         confirmation_keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(text="✅ Да, отменить участие", callback_data=f"leave_confirm:{meeting_id}"),
@@ -1739,7 +2165,7 @@ class BotApp:
         text = (
             f"⚠️ <b>Отмена участия в встрече #{meeting_id}</b>\n\n"
             f"📌 {meeting.topic}\n"
-            f"📅 {when_local:%d.%m.%Y %H:%M}\n\n"
+            f"📅 {when}\n\n"
             "Ты уверен(а), что хочешь отменить своё участие?"
         )
         await cq.message.reply_text(text, reply_markup=confirmation_keyboard, parse_mode="HTML")
@@ -1766,10 +2192,10 @@ class BotApp:
         ok, msg = await self.db.unregister(meeting_id, user.id)
         if ok:
             meeting = await self.db.get_meeting(meeting_id)
-            when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz) if meeting else None
+            when = format_meeting_time(meeting, self.local_tz, style="short") if meeting else None
             text = (
                 f"✅ Твоё участие в встрече #{meeting_id}"
-                + (f" «{meeting.topic}» ({when_local:%d.%m.%Y %H:%M})" if meeting and when_local else "")
+                + (f" «{meeting.topic}» ({when})" if meeting and when else "")
                 + " отменено."
                 + gcal_update_reminder("ru")
             )

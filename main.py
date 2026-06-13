@@ -44,6 +44,16 @@ async def _run_migrations(engine, db: Database) -> None:
             await conn.commit()
         except OperationalError:
             pass
+        try:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN end_at_utc DATETIME"))
+            await conn.commit()
+        except OperationalError:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN registration_starts_at_utc DATETIME"))
+            await conn.commit()
+        except OperationalError:
+            pass
 
     backfilled = await db.backfill_meeting_public_tokens()
     if backfilled:
