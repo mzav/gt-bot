@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, date, timedelta
 from typing import Literal
 
@@ -48,6 +49,16 @@ from .keyboards import (
     LSTEP_TRANSLATIONS,
     photo_skip_keyboard,
     edit_photo_keyboard,
+)
+from .main_menu import (
+    MENU_CREATE,
+    MENU_FORCE_SUMMARY,
+    MENU_HELP,
+    MENU_MEETINGS,
+    build_main_menu_keyboard,
+    MENU_MY,
+    menu_label_filter,
+    remove_main_menu_keyboard,
 )
 
 _CAPTION_LIMIT = 1024
@@ -145,6 +156,10 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_waitlist_view, pattern=r"^waitlist:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_accept, pattern=r"^offer_accept:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_decline, pattern=r"^offer_decline:\d+$"))
+        app.add_handler(MessageHandler(menu_label_filter(), self.handle_main_menu_text))
+        app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_unknown_text),
+        )
 
         # Lifecycle hooks to start/stop scheduler
         async def on_start(_: Application) -> None:
@@ -160,7 +175,13 @@ class BotApp:
     def _build_create_meeting_handler(self) -> ConversationHandler:
         """Build the conversation handler for interactive meeting creation."""
         return ConversationHandler(
-            entry_points=[CommandHandler("create_meeting", self._create_meeting_start)],
+            entry_points=[
+                CommandHandler("create_meeting", self._create_meeting_start),
+                MessageHandler(
+                    filters.Regex(f"^{re.escape(MENU_CREATE)}$"),
+                    self._create_meeting_start,
+                ),
+            ],
             states={
                 self.STATE_TOPIC: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)
@@ -272,6 +293,15 @@ class BotApp:
             allow_reentry=True,
             per_message=False,
         )
+
+    def _is_admin(self, user_id: int | None) -> bool:
+        return user_id is not None and user_id in self.settings.admin_user_ids
+
+    def _main_menu_markup(self, user_id: int | None):
+        return build_main_menu_keyboard(is_admin=self._is_admin(user_id))
+
+    async def _hide_main_menu(self, message) -> None:
+        await message.reply_text("\u200b", reply_markup=remove_main_menu_keyboard())
 
     def _build_meeting_actions_keyboard(
         self,
@@ -449,11 +479,12 @@ class BotApp:
         )
         await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
-    async def _send_welcome_message(self, message) -> None:
+    async def _send_welcome_message(self, message, *, user_id: int | None = None) -> None:
         """Send the default /start welcome text."""
         msg = (
             "🌸 Добро пожаловать в GirlTalkBot! 🌸\n\n"
             "Я помогаю комьюнити Girl Talk легко создавать и вести встречи.\n\n"
+            "Основные действия — в меню ниже 👇\n\n"
             "Доступные команды:\n"
             "📝 /create_meeting — создать встречу topic | description | YYYY-MM-DD HH:MM | max | location\n"
             "📅 /upcoming_meetings — все события\n"
@@ -463,7 +494,12 @@ class BotApp:
             "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
             "Давай делать вместе организацию встреч проще! ✨"
         )
-        await message.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await message.reply_text(
+            msg,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=self._main_menu_markup(user_id),
+        )
 
     async def _handle_meeting_deep_link(self, update: Update, public_token: str) -> None:
         """Open a meeting from a channel deep link."""
@@ -619,6 +655,7 @@ class BotApp:
             reply_markup=self._build_edit_menu_keyboard(),
             parse_mode="HTML",
         )
+        await self._hide_main_menu(cq.message)
         return self.STATE_EDIT_MENU
 
     async def _edit_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -658,10 +695,17 @@ class BotApp:
                     f"{photo_line}"
                     f"{gcal_update_reminder('ru')}"
                 )
+                user = update.effective_user
+                menu = self._main_menu_markup(user.id if user else None)
                 if cq:
                     await cq.edit_message_text(text, parse_mode="HTML")
+                    await cq.message.reply_text("Готово 👇", reply_markup=menu)
                 else:
-                    await update.effective_message.reply_text(text, parse_mode="HTML")
+                    await update.effective_message.reply_text(
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=menu,
+                    )
 
         context.user_data.clear()
         return ConversationHandler.END
@@ -669,7 +713,11 @@ class BotApp:
     async def _edit_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Cancel the edit operation."""
         context.user_data.clear()
-        await update.effective_message.reply_text("Редактирование отменено.")
+        user = update.effective_user
+        await update.effective_message.reply_text(
+            "Редактирование отменено.",
+            reply_markup=self._main_menu_markup(user.id if user else None),
+        )
         return ConversationHandler.END
 
     # ----- Field selection handlers -----
@@ -680,7 +728,10 @@ class BotApp:
         if not cq:
             return self.STATE_EDIT_MENU
         await cq.answer()
-        await cq.edit_message_text("Введи новую тему встречи:")
+        await cq.message.reply_text(
+            "Введи новую тему встречи:",
+            reply_markup=remove_main_menu_keyboard(),
+        )
         return self.STATE_EDIT_TOPIC
 
     async def _edit_select_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -689,7 +740,10 @@ class BotApp:
         if not cq:
             return self.STATE_EDIT_MENU
         await cq.answer()
-        await cq.edit_message_text("Введи новое описание встречи:")
+        await cq.message.reply_text(
+            "Введи новое описание встречи:",
+            reply_markup=remove_main_menu_keyboard(),
+        )
         return self.STATE_EDIT_DESCRIPTION
 
     async def _edit_select_max(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -701,9 +755,10 @@ class BotApp:
 
         meeting_id = context.user_data.get("edit_meeting_id")
         confirmed = await self.db.count_confirmed(meeting_id) if meeting_id else 0
-        await cq.edit_message_text(
+        await cq.message.reply_text(
             f"Введи новое максимальное количество участников.\n"
-            f"(Сейчас зарегистрировано: {confirmed})"
+            f"(Сейчас зарегистрировано: {confirmed})",
+            reply_markup=remove_main_menu_keyboard(),
         )
         return self.STATE_EDIT_MAX
 
@@ -713,9 +768,10 @@ class BotApp:
         if not cq:
             return self.STATE_EDIT_MENU
         await cq.answer()
-        await cq.edit_message_text(
+        await cq.message.reply_text(
             "Введи новое место проведения встречи:\n"
-            "(Отправь '-' чтобы убрать место)"
+            "(Отправь '-' чтобы убрать место)",
+            reply_markup=remove_main_menu_keyboard(),
         )
         return self.STATE_EDIT_LOCATION
 
@@ -1282,7 +1338,8 @@ class BotApp:
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         context.user_data.clear()
         await update.effective_message.reply_text(
-            "Создаём новую встречу! Как она называется?"
+            "Создаём новую встречу! Как она называется?",
+            reply_markup=remove_main_menu_keyboard(),
         )
         return self.STATE_TOPIC
 
@@ -1649,7 +1706,11 @@ class BotApp:
 
     async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
-        await update.effective_message.reply_text("Создание встречи отменено.")
+        user = update.effective_user
+        await update.effective_message.reply_text(
+            "Создание встречи отменено.",
+            reply_markup=self._main_menu_markup(user.id if user else None),
+        )
         return ConversationHandler.END
 
     async def _create_meeting_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1710,10 +1771,13 @@ class BotApp:
             f"🆔 ID встречи: #{meeting.id}"
             f"{disclaimer}"
         )
+        menu = self._main_menu_markup(user.id)
         if cq:
             await cq.edit_message_text(summary, reply_markup=calendar_keyboard)
+            await cq.message.reply_text("Готово 👇", reply_markup=menu)
         else:
             await update.message.reply_text(summary, reply_markup=calendar_keyboard)
+            await update.message.reply_text("Готово 👇", reply_markup=menu)
 
         context.user_data.clear()
         return ConversationHandler.END
@@ -1764,7 +1828,34 @@ class BotApp:
                 )
                 return
 
-        await self._send_welcome_message(message)
+        await self._send_welcome_message(message, user_id=user.id)
+
+    async def handle_main_menu_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Route main-menu reply-keyboard taps to existing command handlers."""
+        message = update.effective_message
+        if not message or not message.text:
+            return
+        text = message.text.strip()
+        if text == MENU_MEETINGS:
+            await self.cmd_meetings(update, context)
+        elif text == MENU_MY:
+            await self.cmd_my(update, context)
+        elif text == MENU_HELP:
+            user = update.effective_user
+            await self._send_welcome_message(message, user_id=user.id if user else None)
+        elif text == MENU_FORCE_SUMMARY:
+            await self.cmd_force_summary(update, context)
+
+    async def handle_unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reply to unrecognized plain text outside active conversations."""
+        message = update.effective_message
+        if not message:
+            return
+        user = update.effective_user
+        await message.reply_text(
+            "Не понимаю. Выбери действие в меню или введи /help.",
+            reply_markup=self._main_menu_markup(user.id if user else None),
+        )
 
     async def cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List all upcoming meetings with register/details buttons."""
