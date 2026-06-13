@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, date, timedelta
+from typing import Literal
 
 from dateutil import tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,6 +20,14 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from .config import Settings
+from .google_calendar import (
+    build_calendar_offer,
+    can_offer_google_calendar,
+    gcal_disclaimer,
+    gcal_update_reminder,
+    google_calendar_keyboard,
+    build_google_calendar_event_url,
+)
 from .links import parse_start_payload
 from .meeting_actions import resolve_meeting_actions
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
@@ -38,16 +47,27 @@ from .keyboards import (
 _CAPTION_LIMIT = 1024
 
 
-async def _reply_with_card(message, text: str, photo_file_id: str | None) -> None:
+async def _reply_with_card(
+    message,
+    text: str,
+    photo_file_id: str | None,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
     """Reply with photo+caption when available, falling back to text-only."""
     if photo_file_id:
         if len(text) <= _CAPTION_LIMIT:
-            await message.reply_photo(photo_file_id, caption=text, parse_mode="HTML")
+            await message.reply_photo(
+                photo_file_id,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
         else:
             await message.reply_photo(photo_file_id)
-            await message.reply_text(text, parse_mode="HTML")
+            await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
     else:
-        await message.reply_text(text, parse_mode="HTML")
+        await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +318,35 @@ class BotApp:
             waitlist_state = await self.waitlist.get_user_waitlist_state(meeting_id, user_id)
         return available, is_participant, waitlist_state
 
+    def _google_calendar_url(self, meeting: Meeting) -> str | None:
+        return build_google_calendar_event_url(
+            meeting,
+            local_tz=self.local_tz,
+            bot_username=self.bot_username,
+        )
+
+    def _google_calendar_keyboard(
+        self, meeting: Meeting, *, lang: Literal["en", "ru"] = "en"
+    ) -> InlineKeyboardMarkup | None:
+        url = self._google_calendar_url(meeting)
+        if not url:
+            return None
+        return google_calendar_keyboard(url, lang=lang)
+
+    async def _send_google_calendar_offer(
+        self, message, meeting: Meeting, *, lang: Literal["en", "ru"]
+    ) -> None:
+        offer = build_calendar_offer(
+            meeting,
+            local_tz=self.local_tz,
+            bot_username=self.bot_username,
+            lang=lang,
+        )
+        if not offer:
+            return
+        text, keyboard = offer
+        await message.reply_text(text, reply_markup=keyboard)
+
     def _upcoming_meetings_fallback_keyboard(self) -> InlineKeyboardMarkup:
         """Keyboard shown when a meeting deep link cannot be opened."""
         return InlineKeyboardMarkup([[
@@ -530,6 +579,7 @@ class BotApp:
                     f"👥 Макс. участников: {meeting.max_participants}\n"
                     f"📍 Место: {meeting.location or 'не указано'}"
                     f"{photo_line}"
+                    f"{gcal_update_reminder('ru')}"
                 )
                 if cq:
                     await cq.edit_message_text(text, parse_mode="HTML")
@@ -1233,6 +1283,8 @@ class BotApp:
 
         when_local = ensure_utc(meeting.start_at_utc).astimezone(self.local_tz)
         photo_line = "\n🖼 Фото: прикреплено" if photo_file_id else ""
+        calendar_keyboard = self._google_calendar_keyboard(meeting, lang="ru")
+        disclaimer = f"\n\n{gcal_disclaimer('ru')}" if calendar_keyboard else ""
         summary = (
             "✅ Спасибо! Встреча создана.\n\n"
             f"📌 Название: {meeting.topic}\n"
@@ -1242,11 +1294,12 @@ class BotApp:
             f"👥 Максимум участников: {meeting.max_participants}"
             f"{photo_line}\n"
             f"🆔 ID встречи: #{meeting.id}"
+            f"{disclaimer}"
         )
         if cq:
-            await cq.edit_message_text(summary)
+            await cq.edit_message_text(summary, reply_markup=calendar_keyboard)
         else:
-            await update.message.reply_text(summary)
+            await update.message.reply_text(summary, reply_markup=calendar_keyboard)
 
         context.user_data.clear()
         return ConversationHandler.END
@@ -1382,6 +1435,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting_id)
                 await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+                await self._send_google_calendar_offer(update.effective_message, meeting, lang="en")
 
     async def cmd_unregister(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Unregister current user from a meeting by ID."""
@@ -1398,6 +1452,8 @@ class BotApp:
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
         ok, msg = await self.db.unregister(meeting_id, user.id)
+        if ok:
+            msg += gcal_update_reminder("en")
         await update.effective_message.reply_text(msg)
         if ok:
             meeting = await self.db.get_meeting(meeting_id)
@@ -1432,6 +1488,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting_id)
                 await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+                await self._send_google_calendar_offer(cq.message, meeting, lang="en")
 
     async def cb_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Подробности' button presses to show meeting details."""
@@ -1480,14 +1537,21 @@ class BotApp:
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
         user = update.effective_user
+        calendar_keyboard = None
         if user:
+            is_host = m.created_by == user.id
+            is_participant = await self.db.is_registered(m.id, user.id)
+            if can_offer_google_calendar(is_host=is_host, is_participant=is_participant):
+                calendar_keyboard = self._google_calendar_keyboard(m, lang="en")
+                if calendar_keyboard:
+                    details_text += f"\n\n{gcal_disclaimer('en')}"
             entry = await self.db.get_active_waitlist_entry(m.id, user.id)
             if entry:
                 position = await self.db.get_queue_position(entry.id) if entry.status == WaitlistStatus.WAITING else None
                 waitlist_line = self.waitlist.format_details_waitlist_line(entry, position)
                 if waitlist_line:
                     details_text += f"\n{waitlist_line}"
-        await _reply_with_card(cq.message, details_text, m.photo_file_id)
+        await _reply_with_card(cq.message, details_text, m.photo_file_id, reply_markup=calendar_keyboard)
 
     async def cb_participants(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the host a numbered list of confirmed participants for their meeting."""
@@ -1616,6 +1680,7 @@ class BotApp:
             f"📌 {canceled_meeting.topic}\n"
             f"📅 {when_local:%d.%m.%Y %H:%M}\n\n"
             "Встреча успешно отменена."
+            f"{gcal_update_reminder('ru')}"
         )
         await cq.edit_message_text(text, parse_mode="HTML")
 
@@ -1706,6 +1771,7 @@ class BotApp:
                 f"✅ Твоё участие в встрече #{meeting_id}"
                 + (f" «{meeting.topic}» ({when_local:%d.%m.%Y %H:%M})" if meeting and when_local else "")
                 + " отменено."
+                + gcal_update_reminder("ru")
             )
             await cq.edit_message_text(text, parse_mode="HTML")
             if meeting:
@@ -1810,6 +1876,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting.id)
                 await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+                await self._send_google_calendar_offer(cq.message, meeting, lang="en")
 
     async def cb_offer_decline(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
