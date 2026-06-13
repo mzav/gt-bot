@@ -283,6 +283,7 @@ class BotApp:
         is_participant: bool = False,
         available: int = 1,
         waitlist_state: str | None = None,
+        waitlist_count: int = 0,
         registration_open: bool = True,
     ) -> InlineKeyboardMarkup:
         """Build action buttons for a meeting list entry."""
@@ -301,14 +302,15 @@ class BotApp:
                     InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
                     InlineKeyboardButton(text="Участники", callback_data=f"participants:{meeting_id}"),
                 ],
-                [
-                    InlineKeyboardButton(text="Waitlist", callback_data=f"waitlist:{meeting_id}"),
-                ],
-                [
-                    InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
-                    InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
-                ],
             ]
+            if waitlist_count > 0:
+                buttons.append([
+                    InlineKeyboardButton(text="Waitlist", callback_data=f"waitlist:{meeting_id}"),
+                ])
+            buttons.append([
+                InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
+                InlineKeyboardButton(text="Отменить", callback_data=f"cancel:{meeting_id}"),
+            ])
             return InlineKeyboardMarkup(buttons)
         if action == "register":
             buttons = [
@@ -431,6 +433,9 @@ class BotApp:
         _, is_participant, waitlist_state = await self._get_meeting_user_context(
             meeting.id, user_id, include_register=include_register
         )
+        waitlist_count = 0
+        if user_id is not None and meeting.created_by == user_id:
+            waitlist_count = await self.db.count_active_waitlist(meeting.id)
         keyboard = self._build_meeting_actions_keyboard(
             meeting.id,
             user_id,
@@ -439,6 +444,7 @@ class BotApp:
             is_participant=is_participant,
             available=available,
             waitlist_state=waitlist_state,
+            waitlist_count=waitlist_count,
             registration_open=reg_open,
         )
         await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -1823,7 +1829,12 @@ class BotApp:
                 f"📍 {m.location or 'TBA'}\n"
                 f"Свободных мест: {available} (+ведущих: {hosts})"
             )
-            keyboard = self._build_meeting_actions_keyboard(m.id, user.id, m.created_by, is_participant=True)
+            waitlist_count = 0
+            if m.created_by == user.id:
+                waitlist_count = await self.db.count_active_waitlist(m.id)
+            keyboard = self._build_meeting_actions_keyboard(
+                m.id, user.id, m.created_by, is_participant=True, waitlist_count=waitlist_count
+            )
             await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def cmd_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
