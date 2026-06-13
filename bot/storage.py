@@ -4,7 +4,6 @@ Exposes a thin CRUD wrapper around the models for use by handlers/scheduler.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -12,11 +11,11 @@ from pathlib import Path
 from typing import AsyncIterator, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func
 from sqlalchemy.engine import Row
 
 from .links import generate_meeting_public_token
-from .models import Base, User, Meeting, Registration, RegistrationStatus
+from .models import Base, User, Meeting, Registration, RegistrationStatus, WaitlistEntry, WaitlistStatus
 
 log = logging.getLogger(__name__)
 
@@ -166,14 +165,53 @@ class Database:
     async def count_confirmed(self, meeting_id: int) -> int:
         """Return the number of confirmed participants (excluding hosts)."""
         async with self.session() as s:
-            res = await s.execute(
-                select(func.count()).select_from(Registration).where(
-                    Registration.meeting_id == meeting_id,
-                    Registration.status == RegistrationStatus.CONFIRMED,
-                    Registration.is_host == False,
-                )
+            return await self._count_confirmed_in_session(s, meeting_id)
+
+    async def _count_confirmed_in_session(self, s: AsyncSession, meeting_id: int) -> int:
+        res = await s.execute(
+            select(func.count()).select_from(Registration).where(
+                Registration.meeting_id == meeting_id,
+                Registration.status == RegistrationStatus.CONFIRMED,
+                Registration.is_host == False,  # noqa: E712
             )
-            return int(res.scalar_one())
+        )
+        return int(res.scalar_one())
+
+    async def _count_offered_in_session(self, s: AsyncSession, meeting_id: int) -> int:
+        res = await s.execute(
+            select(func.count()).select_from(WaitlistEntry).where(
+                WaitlistEntry.meeting_id == meeting_id,
+                WaitlistEntry.status == WaitlistStatus.OFFERED,
+            )
+        )
+        return int(res.scalar_one())
+
+    async def count_reserved_spots(self, meeting_id: int) -> int:
+        """Return the number of spots temporarily reserved by active offers."""
+        async with self.session() as s:
+            return await self._count_offered_in_session(s, meeting_id)
+
+    async def available_spots(self, meeting_id: int) -> int:
+        """Return open participant spots (excludes hosts and reserved offers)."""
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None:
+                return 0
+            confirmed = await self._count_confirmed_in_session(s, meeting_id)
+            reserved = await self._count_offered_in_session(s, meeting_id)
+            return max(m.max_participants - confirmed - reserved, 0)
+
+    async def is_meeting_open(self, meeting_id: int, now_utc: datetime) -> bool:
+        """Return True if the meeting exists, is not canceled, and has not started."""
+        from .utils import ensure_utc as _ensure_utc
+
+        now_utc = _ensure_utc(now_utc)
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None or m.canceled_at is not None:
+                return False
+            start = _ensure_utc(m.start_at_utc)
+            return start >= now_utc
 
     async def count_hosts(self, meeting_id: int) -> int:
         """Return the number of confirmed hosts for the meeting."""
@@ -217,7 +255,7 @@ class Database:
             return res.all()
 
     async def register(self, meeting_id: int, user_id: int) -> tuple[bool, str, str | None]:
-        """Register a user for a meeting, using waitlist if full.
+        """Register a user for a meeting when spots are available.
 
         Returns:
             Tuple of (success, message, registration_status). Status is None on failure.
@@ -226,52 +264,48 @@ class Database:
             m = await s.get(Meeting, meeting_id)
             if m is None or m.canceled_at is not None:
                 return False, "Meeting not found or canceled.", None
-            # Check if already registered
             res = await s.execute(
-                select(Registration).where(Registration.meeting_id == meeting_id, Registration.user_id == user_id,
-                                           Registration.status == RegistrationStatus.CONFIRMED)
-            )
-            existing = res.scalar_one_or_none()
-            if existing:
-                return False, "You are already registered.", None
-            # Count current confirmed
-            res = await s.execute(
-                select(func.count()).select_from(Registration).where(
-                    Registration.meeting_id == meeting_id, Registration.status == RegistrationStatus.CONFIRMED
+                select(Registration).where(
+                    Registration.meeting_id == meeting_id,
+                    Registration.user_id == user_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
                 )
             )
-            count = int(res.scalar_one())
-            status = RegistrationStatus.CONFIRMED if count < m.max_participants else RegistrationStatus.WAITLISTED
-            reg = Registration(meeting_id=meeting_id, user_id=user_id, status=status)
+            if res.scalar_one_or_none():
+                return False, "You are already registered.", None
+            confirmed = await self._count_confirmed_in_session(s, meeting_id)
+            reserved = await self._count_offered_in_session(s, meeting_id)
+            if confirmed + reserved >= m.max_participants:
+                return False, "Meeting is full. Join the waitlist if a spot opens.", None
+            reg = Registration(
+                meeting_id=meeting_id,
+                user_id=user_id,
+                status=RegistrationStatus.CONFIRMED,
+            )
             s.add(reg)
             await s.commit()
-            if status == RegistrationStatus.WAITLISTED:
-                return True, "Meeting is full. You are added to the waitlist.", status
-            return True, "Registered successfully.", status
+            return True, "Registered successfully.", RegistrationStatus.CONFIRMED
 
     async def is_registered(self, meeting_id: int, user_id: int) -> bool:
-        """Check if user has an active (confirmed or waitlisted) registration."""
+        """Check if user has an active confirmed registration."""
         async with self.session() as s:
             res = await s.execute(
                 select(Registration).where(
                     Registration.meeting_id == meeting_id,
                     Registration.user_id == user_id,
-                    Registration.status.in_([RegistrationStatus.CONFIRMED, RegistrationStatus.WAITLISTED]),
+                    Registration.status == RegistrationStatus.CONFIRMED,
                 )
             )
             return res.scalar_one_or_none() is not None
 
     async def unregister(self, meeting_id: int, user_id: int) -> tuple[bool, str]:
-        """Cancel a user's registration for a meeting.
-
-        Returns:
-            Tuple[bool, str]: Success flag and a human-readable message.
-        """
+        """Cancel a user's confirmed registration for a meeting."""
         async with self.session() as s:
             res = await s.execute(
                 select(Registration).where(
-                    Registration.meeting_id == meeting_id, Registration.user_id == user_id,
-                    Registration.status.in_([RegistrationStatus.CONFIRMED, RegistrationStatus.WAITLISTED])
+                    Registration.meeting_id == meeting_id,
+                    Registration.user_id == user_id,
+                    Registration.status == RegistrationStatus.CONFIRMED,
                 )
             )
             reg = res.scalar_one_or_none()
@@ -343,3 +377,88 @@ class Database:
             await s.commit()
             await s.refresh(m)
             return m
+
+    # Waitlist
+    async def get_active_waitlist_entry(self, meeting_id: int, user_id: int) -> WaitlistEntry | None:
+        """Return the user's active waitlist entry for a meeting, if any."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(WaitlistEntry).where(
+                    WaitlistEntry.meeting_id == meeting_id,
+                    WaitlistEntry.user_id == user_id,
+                    WaitlistEntry.status.in_(WaitlistStatus.ACTIVE),
+                )
+            )
+            return res.scalar_one_or_none()
+
+    async def get_waitlist_entry(self, entry_id: int) -> WaitlistEntry | None:
+        """Return a waitlist entry by id."""
+        async with self.session() as s:
+            return await s.get(WaitlistEntry, entry_id)
+
+    async def create_waitlist_entry(self, meeting_id: int, user_id: int) -> WaitlistEntry:
+        """Create a new waiting waitlist entry."""
+        async with self.session() as s:
+            entry = WaitlistEntry(
+                meeting_id=meeting_id,
+                user_id=user_id,
+                status=WaitlistStatus.WAITING,
+            )
+            s.add(entry)
+            await s.commit()
+            await s.refresh(entry)
+            return entry
+
+    async def list_waitlist_for_meeting(
+        self, meeting_id: int, *, include_all_statuses: bool = False
+    ) -> Sequence[Row[tuple[WaitlistEntry, User]]]:
+        """Return waitlist entries joined with user data, ordered by queue position."""
+        async with self.session() as s:
+            q = (
+                select(WaitlistEntry, User)
+                .join(User, User.id == WaitlistEntry.user_id)
+                .where(WaitlistEntry.meeting_id == meeting_id)
+                .order_by(WaitlistEntry.created_at.asc())
+            )
+            if not include_all_statuses:
+                q = q.where(WaitlistEntry.status.in_(WaitlistStatus.ACTIVE))
+            res = await s.execute(q)
+            return res.all()
+
+    async def count_active_waitlist(self, meeting_id: int) -> int:
+        """Return the number of active waitlist entries for a meeting."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(func.count()).select_from(WaitlistEntry).where(
+                    WaitlistEntry.meeting_id == meeting_id,
+                    WaitlistEntry.status.in_(WaitlistStatus.ACTIVE),
+                )
+            )
+            return int(res.scalar_one())
+
+    async def get_queue_position(self, entry_id: int) -> int | None:
+        """Return 1-based queue position among waiting entries."""
+        async with self.session() as s:
+            entry = await s.get(WaitlistEntry, entry_id)
+            if entry is None or entry.status != WaitlistStatus.WAITING:
+                return None
+            res = await s.execute(
+                select(func.count()).select_from(WaitlistEntry).where(
+                    WaitlistEntry.meeting_id == entry.meeting_id,
+                    WaitlistEntry.status == WaitlistStatus.WAITING,
+                    WaitlistEntry.created_at < entry.created_at,
+                )
+            )
+            return int(res.scalar_one()) + 1
+
+    async def get_expired_offers(self, now_utc: datetime) -> Sequence[WaitlistEntry]:
+        """Return offered entries whose offer has expired."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(WaitlistEntry).where(
+                    WaitlistEntry.status == WaitlistStatus.OFFERED,
+                    WaitlistEntry.offer_expires_at.is_not(None),
+                    WaitlistEntry.offer_expires_at < now_utc,
+                )
+            )
+            return res.scalars().all()

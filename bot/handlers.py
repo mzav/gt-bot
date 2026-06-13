@@ -20,9 +20,11 @@ from telegram.constants import ParseMode
 
 from .config import Settings
 from .links import parse_start_payload
-from .models import Meeting, User, RegistrationStatus
+from .meeting_actions import resolve_meeting_actions
+from .models import Meeting, User, RegistrationStatus, WaitlistStatus
 from .storage import Database
 from .scheduler import BotScheduler
+from .waitlist import WaitlistService, OfferNotification, send_offer_dms
 from .utils import ensure_utc
 from .keyboards import (
     MeetingCalendar,
@@ -76,10 +78,11 @@ class BotApp:
     STATE_EDIT_MINUTE = 18
     STATE_EDIT_PHOTO = 19
 
-    def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler):
+    def __init__(self, settings: Settings, db: Database, scheduler: BotScheduler, waitlist: WaitlistService):
         self.settings = settings
         self.db = db
         self.scheduler = scheduler
+        self.waitlist = waitlist
         self.local_tz = tz.gettz(settings.tz)
         self.bot_username: str | None = settings.telegram_bot_username
 
@@ -105,6 +108,11 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_leave_abort, pattern=r"^leave_abort:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_show_upcoming, pattern=r"^show_upcoming$"))
+        app.add_handler(CallbackQueryHandler(self.cb_waitlist_join, pattern=r"^waitlist_join:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_waitlist_cancel, pattern=r"^waitlist_cancel:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_waitlist_view, pattern=r"^waitlist:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_offer_accept, pattern=r"^offer_accept:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_offer_decline, pattern=r"^offer_decline:\d+$"))
 
         # Lifecycle hooks to start/stop scheduler
         async def on_start(_: Application) -> None:
@@ -219,15 +227,25 @@ class BotApp:
         include_register: bool = False,
         is_participant: bool = False,
         available: int = 1,
+        waitlist_state: str | None = None,
     ) -> InlineKeyboardMarkup:
         """Build action buttons for a meeting list entry."""
         is_host = user_id is not None and created_by == user_id
-        can_register = include_register and not is_host and not is_participant and available > 0
-        if is_host:
+        action = resolve_meeting_actions(
+            is_host=is_host,
+            is_participant=is_participant,
+            available=available,
+            waitlist_state=waitlist_state,
+            include_register=include_register,
+        )
+        if action == "host":
             buttons = [
                 [
                     InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
                     InlineKeyboardButton(text="Участники", callback_data=f"participants:{meeting_id}"),
+                ],
+                [
+                    InlineKeyboardButton(text="Waitlist", callback_data=f"waitlist:{meeting_id}"),
                 ],
                 [
                     InlineKeyboardButton(text="Изменить", callback_data=f"edit:{meeting_id}"),
@@ -235,21 +253,50 @@ class BotApp:
                 ],
             ]
             return InlineKeyboardMarkup(buttons)
-        elif can_register:
+        if action == "register":
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
                 InlineKeyboardButton(text="Записаться", callback_data=f"register:{meeting_id}"),
             ]
-        elif is_participant:
+        elif action == "participant":
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
                 InlineKeyboardButton(text="Отменить участие", callback_data=f"leave:{meeting_id}"),
+            ]
+        elif action == "waitlist_join":
+            buttons = [
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                InlineKeyboardButton(text="В waitlist", callback_data=f"waitlist_join:{meeting_id}"),
+            ]
+        elif action == "waitlist_waiting":
+            buttons = [
+                InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
+                InlineKeyboardButton(text="Отменить waitlist", callback_data=f"waitlist_cancel:{meeting_id}"),
             ]
         else:
             buttons = [
                 InlineKeyboardButton(text="Подробности", callback_data=f"details:{meeting_id}"),
             ]
         return InlineKeyboardMarkup([buttons])
+
+    def _build_waitlist_join_keyboard(self, meeting_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(text="Отменить waitlist", callback_data=f"waitlist_cancel:{meeting_id}"),
+                InlineKeyboardButton(text="Показать встречу", callback_data=f"details:{meeting_id}"),
+            ],
+        ])
+
+    async def _get_meeting_user_context(
+        self, meeting_id: int, user_id: int | None, *, include_register: bool = True
+    ) -> tuple[int, bool, str | None]:
+        available = await self.db.available_spots(meeting_id)
+        is_participant = False
+        waitlist_state = None
+        if user_id is not None:
+            is_participant = await self.db.is_registered(meeting_id, user_id)
+            waitlist_state = await self.waitlist.get_user_waitlist_state(meeting_id, user_id)
+        return available, is_participant, waitlist_state
 
     def _upcoming_meetings_fallback_keyboard(self) -> InlineKeyboardMarkup:
         """Keyboard shown when a meeting deep link cannot be opened."""
@@ -263,7 +310,7 @@ class BotApp:
         host_name = await self.db.get_user_name(meeting.created_by) or "Unknown"
         confirmed = await self.db.count_confirmed(meeting.id)
         hosts = await self.db.count_hosts(meeting.id)
-        available = max(meeting.max_participants - confirmed, 0)
+        available = await self.db.available_spots(meeting.id)
         text = (
             f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
             f"<b>{meeting.topic}</b>\n"
@@ -272,6 +319,16 @@ class BotApp:
             f"Свободных мест: {available} (+ведущих: {hosts})"
         )
         return text, available, confirmed, hosts
+
+    async def _send_waitlist_offer_dms(self, notifications: list[OfferNotification]) -> None:
+        if not self.scheduler._bot:
+            return
+        await send_offer_dms(self.scheduler._bot, self.waitlist, notifications)
+
+    async def _process_waitlist_after_unregister(self, meeting_id: int) -> None:
+        now_utc = datetime.now(tz.UTC)
+        notifications = await self.waitlist.process_available_spots(meeting_id, now_utc)
+        await self._send_waitlist_offer_dms(notifications)
 
     async def _send_upcoming_meeting_entry(
         self,
@@ -283,7 +340,9 @@ class BotApp:
     ) -> None:
         """Send one upcoming-meeting card with contextual action buttons."""
         text, available, _, _ = await self._format_upcoming_meeting_summary(meeting)
-        is_participant = user_id is not None and await self.db.is_registered(meeting.id, user_id)
+        _, is_participant, waitlist_state = await self._get_meeting_user_context(
+            meeting.id, user_id, include_register=include_register
+        )
         keyboard = self._build_meeting_actions_keyboard(
             meeting.id,
             user_id,
@@ -291,6 +350,7 @@ class BotApp:
             include_register=include_register,
             is_participant=is_participant,
             available=available,
+            waitlist_state=waitlist_state,
         )
         await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -1290,7 +1350,7 @@ class BotApp:
             host_name = await self.db.get_user_name(m.created_by) or "Unknown"
             confirmed = await self.db.count_confirmed(m.id)
             hosts = await self.db.count_hosts(m.id)
-            available = max(m.max_participants - confirmed, 0)
+            available = await self.db.available_spots(m.id)
             text = (
                 f"<b>{when_local:%Y-%m-%d %H:%M}</b>\n"
                 f"<b>{m.topic}</b>\n"
@@ -1344,6 +1404,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting_id)
                 await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
+                await self._process_waitlist_after_unregister(meeting_id)
 
     # ========== Callback Query Handlers ==========
 
@@ -1418,6 +1479,14 @@ class BotApp:
             f"👤 Ведет: {host_display}\n"
             f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
         )
+        user = update.effective_user
+        if user:
+            entry = await self.db.get_active_waitlist_entry(m.id, user.id)
+            if entry:
+                position = await self.db.get_queue_position(entry.id) if entry.status == WaitlistStatus.WAITING else None
+                waitlist_line = self.waitlist.format_details_waitlist_line(entry, position)
+                if waitlist_line:
+                    details_text += f"\n{waitlist_line}"
         await _reply_with_card(cq.message, details_text, m.photo_file_id)
 
     async def cb_participants(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1644,6 +1713,7 @@ class BotApp:
                 if db_user:
                     confirmed = await self.db.count_confirmed(meeting_id)
                     await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
+                await self._process_waitlist_after_unregister(meeting_id)
         else:
             await cq.edit_message_text(f"Не удалось отменить участие: {msg}")
 
@@ -1663,3 +1733,94 @@ class BotApp:
             return
 
         await cq.edit_message_text(f"Отмена участия во встрече #{meeting_id} отклонена. Ты остаёшься участником.")
+
+    async def cb_waitlist_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        meeting_id = int((cq.data or "").split(":", 1)[1])
+        now_utc = datetime.now(tz.UTC)
+        result = await self.waitlist.join_waitlist(meeting_id, user.id, now_utc)
+        if not result.ok:
+            await cq.message.reply_text(result.message)
+            return
+        meeting = await self.db.get_meeting(meeting_id)
+        if not meeting:
+            await cq.message.reply_text(result.message)
+            return
+        text = self.waitlist.format_join_confirmation(meeting, result.position)
+        await cq.message.reply_text(
+            text,
+            reply_markup=self._build_waitlist_join_keyboard(meeting_id),
+            parse_mode="HTML",
+        )
+
+    async def cb_waitlist_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        meeting_id = int((cq.data or "").split(":", 1)[1])
+        result = await self.waitlist.cancel_waitlist(meeting_id, user.id)
+        await cq.message.reply_text(result.message)
+
+    async def cb_waitlist_view(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        meeting_id = int((cq.data or "").split(":", 1)[1])
+        meeting = await self.db.get_meeting(meeting_id)
+        if not meeting:
+            await cq.message.reply_text("Встреча не найдена.")
+            return
+        if meeting.created_by != user.id:
+            await cq.message.reply_text("Waitlist доступен только организатору встречи.")
+            return
+        rows = await self.db.list_waitlist_for_meeting(meeting_id, include_all_statuses=True)
+        text = self.waitlist.format_host_waitlist(meeting, rows)
+        await cq.message.reply_text(text, parse_mode="HTML")
+
+    async def cb_offer_accept(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        entry_id = int((cq.data or "").split(":", 1)[1])
+        now_utc = datetime.now(tz.UTC)
+        result = await self.waitlist.accept_offer(entry_id, user.id, now_utc)
+        await cq.message.reply_text(result.message)
+        if result.ok and result.entry:
+            meeting = await self.db.get_meeting(result.entry.meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting.id)
+                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+
+    async def cb_offer_decline(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        entry_id = int((cq.data or "").split(":", 1)[1])
+        now_utc = datetime.now(tz.UTC)
+        result = await self.waitlist.decline_offer(entry_id, user.id, now_utc)
+        await cq.message.reply_text(result.message)
+        await self._send_waitlist_offer_dms(result.notifications)

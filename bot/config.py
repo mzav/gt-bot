@@ -54,6 +54,9 @@ class Settings(BaseModel):
     # Telegram user IDs allowed to use privileged commands (e.g. /force_summary).
     admin_user_ids: List[int] = Field(default_factory=list)
 
+    waitlist_offer_expiry_hours: int = 6
+    waitlist_offer_check_interval_minutes: int = 15
+
     def tzinfo(self) -> zoneinfo.ZoneInfo:
         """Return ZoneInfo instance for the configured time zone."""
         return zoneinfo.ZoneInfo(self.tz)
@@ -108,6 +111,8 @@ def load_settings() -> Settings:
     notify_batch_interval_minutes = int(os.getenv("NOTIFY_BATCH_INTERVAL_MINUTES", "30"))
     admin_ids_env = os.getenv("ADMIN_USER_IDS", "")
     admin_user_ids = [int(x) for x in admin_ids_env.split(",") if x.strip().lstrip("-").isdigit()]
+    waitlist_offer_expiry_hours = int(os.getenv("WAITLIST_OFFER_EXPIRY_HOURS", "6"))
+    waitlist_offer_check_interval_minutes = int(os.getenv("WAITLIST_OFFER_CHECK_INTERVAL_MINUTES", "15"))
 
     return Settings(
         telegram_bot_token=token,
@@ -122,4 +127,6 @@ def load_settings() -> Settings:
         notify_batch_threshold=notify_batch_threshold,
         notify_batch_interval_minutes=notify_batch_interval_minutes,
         admin_user_ids=admin_user_ids,
+        waitlist_offer_expiry_hours=waitlist_offer_expiry_hours,
+        waitlist_offer_check_interval_minutes=waitlist_offer_check_interval_minutes,
     )

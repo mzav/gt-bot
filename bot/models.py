@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime
+from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -23,6 +23,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     registrations: Mapped[list[Registration]] = relationship("Registration", back_populates="user", cascade="all, delete-orphan")
+    waitlist_entries: Mapped[list["WaitlistEntry"]] = relationship("WaitlistEntry", back_populates="user", cascade="all, delete-orphan")
     hosted_meetings: Mapped[list[Meeting]] = relationship("Meeting", back_populates="host")
 
 
@@ -46,13 +47,25 @@ class Meeting(Base):
 
     host: Mapped[User] = relationship("User", back_populates="hosted_meetings")
     registrations: Mapped[list[Registration]] = relationship("Registration", back_populates="meeting", cascade="all, delete-orphan")
+    waitlist_entries: Mapped[list["WaitlistEntry"]] = relationship("WaitlistEntry", back_populates="meeting", cascade="all, delete-orphan")
 
 
 class RegistrationStatus:
     """Constants representing a participant's registration status."""
     CONFIRMED = "confirmed"
-    WAITLISTED = "waitlisted"
     CANCELED = "canceled"
+
+
+class WaitlistStatus:
+    """Constants representing a waitlist entry status."""
+    WAITING = "waiting"
+    OFFERED = "offered"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+    ACTIVE = frozenset({WAITING, OFFERED})
 
 
 class Registration(Base):
@@ -68,3 +81,22 @@ class Registration(Base):
 
     meeting: Mapped[Meeting] = relationship("Meeting", back_populates="registrations")
     user: Mapped[User] = relationship("User", back_populates="registrations")
+
+
+class WaitlistEntry(Base):
+    """Waitlist queue entry for a meeting."""
+    __tablename__ = "waitlist_entries"
+    __table_args__ = (
+        Index("ix_waitlist_meeting_user", "meeting_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default=WaitlistStatus.WAITING, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    offered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    offer_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    meeting: Mapped[Meeting] = relationship("Meeting", back_populates="waitlist_entries")
+    user: Mapped[User] = relationship("User", back_populates="waitlist_entries")

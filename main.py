@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from logging import Logger
+
+from dateutil import tz
 
 from bot.config import load_settings
 from bot.storage import Database
 from bot.scheduler import BotScheduler
 from bot.handlers import BotApp
+from bot.waitlist import WaitlistService
 
 
 _CAPTION_LIMIT = 1024
@@ -66,7 +70,13 @@ async def main_async() -> None:
     await db.create_all()
     await _run_migrations(db.engine, db)
 
-    bot_app = BotApp(settings, db, None)  # type: ignore[arg-type]
+    waitlist = WaitlistService(
+        db,
+        offer_ttl=timedelta(hours=settings.waitlist_offer_expiry_hours),
+        local_tz=tz.gettz(settings.tz),
+    )
+
+    bot_app = BotApp(settings, db, None, waitlist)  # type: ignore[arg-type]
 
     # Create application first so we can send messages via scheduler
     application = bot_app.build()
@@ -114,6 +124,7 @@ async def main_async() -> None:
         bot=application.bot,
         notify_threshold=settings.notify_batch_threshold,
         bot_username=bot_username,
+        waitlist_service=waitlist,
     )
     # Re-assign scheduler into bot_app instance so hooks work
     bot_app.scheduler = scheduler
@@ -123,6 +134,7 @@ async def main_async() -> None:
     scheduler.schedule_announcements(announce_conf.days, announce_conf.time_of_day, settings.announcements_channel_id)
     scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
     scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)
+    scheduler.schedule_waitlist_expiration(settings.waitlist_offer_check_interval_minutes)
 
     try:
         # Ensure scheduler is running even if post_init hook changes in PTB
