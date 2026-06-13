@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from bot.messages import REGISTRATION_SUCCESS
 from bot.models import RegistrationStatus
 from tests.conftest import create_host, create_meeting, fill_meeting
 
@@ -18,6 +19,7 @@ async def test_register_when_spots_available(db):
     ok, msg, status = await db.register(meeting_id, 10)
     assert ok
     assert status == RegistrationStatus.CONFIRMED
+    assert msg == REGISTRATION_SUCCESS
     assert await db.is_registered(meeting_id, 10)
 
 

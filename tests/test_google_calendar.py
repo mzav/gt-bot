@@ -120,6 +120,15 @@ def test_build_url_default_duration_two_hours(berlin_tz):
     assert DEFAULT_MEETING_DURATION.total_seconds() == 2 * 3600
 
 
+def test_build_url_uses_meeting_end_at_utc(berlin_tz):
+    meeting = _make_meeting(
+        end_at_utc=datetime(2026, 7, 1, 19, 30, 0, tzinfo=timezone.utc),
+    )
+    url = build_google_calendar_event_url(meeting, local_tz=berlin_tz)
+    params = parse_qs(urlparse(url).query)
+    assert params["dates"] == ["20260701T180000/20260701T213000"]
+
+
 def test_build_url_special_characters_encoded(berlin_tz):
     meeting = _make_meeting(
         topic="Meet & Greet",

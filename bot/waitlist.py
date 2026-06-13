@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from telegram import Bot, InlineKeyboardMarkup
 
 from .models import Meeting, WaitlistEntry, WaitlistStatus, Registration, RegistrationStatus
-from .storage import Database
+from .storage import Database, is_registration_open
 from .utils import ensure_utc
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,11 @@ class WaitlistService:
         return None
 
     async def join_waitlist(self, meeting_id: int, user_id: int, now_utc: datetime) -> WaitlistResult:
+        meeting = await self.db.get_meeting(meeting_id)
+        if meeting is None or meeting.canceled_at is not None:
+            return WaitlistResult(False, "Встреча недоступна для waitlist.")
+        if not is_registration_open(meeting, now_utc):
+            return WaitlistResult(False, "Регистрация на эту встречу ещё не открыта.")
         if not await self.db.is_meeting_open(meeting_id, now_utc):
             return WaitlistResult(False, "Встреча недоступна для waitlist.")
         if await self.db.is_registered(meeting_id, user_id):

@@ -17,6 +17,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .links import build_meeting_deep_link, meeting_channel_cta_keyboard
 from .storage import Database
+from .meeting_format import format_meeting_time
 from .models import Meeting, User
 from .utils import ensure_utc
 
@@ -84,9 +85,9 @@ def _format_meeting_card(
     deep_link: str | None = None,
 ) -> str:
     """Format a single meeting as a rich text card (HTML)."""
-    when_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
+    when = format_meeting_time(meeting, local_tz, style="card")
     lines = [
-        f"<b>{when_local:%d.%m (%A) %H:%M}</b>",
+        f"<b>{when}</b>",
         f"<b>{meeting.topic}</b>",
         f"Ведет {_display_name(host)}." if host else "",
         f"🌻 Registered: {confirmed} / {meeting.max_participants} participants (+ведущих: {hosts})",
@@ -100,9 +101,9 @@ def _format_meeting_card(
 
 def _format_today_card(meeting: Meeting, participants: int, local_tz) -> str:
     """Format a meeting card for the daily 'today' announcement."""
-    when_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
+    when = format_meeting_time(meeting, local_tz, style="today")
     lines = [
-        f"🔔 <b>Meeting today — {when_local:%H:%M}</b>",
+        f"🔔 <b>Meeting today — {when}</b>",
         f"<b>{meeting.topic}</b>",
         meeting.description or "",
         f"👥 {participants} participant{'s' if participants != 1 else ''}",
@@ -114,12 +115,12 @@ def _format_today_card(meeting: Meeting, participants: int, local_tz) -> str:
 
 def _format_new_meeting_card(meeting: Meeting, participants: int, local_tz) -> str:
     """Format an immediate announcement for a newly created meeting (HTML)."""
-    when_local = ensure_utc(meeting.start_at_utc).astimezone(local_tz)
+    when = format_meeting_time(meeting, local_tz, style="card_new")
     lines = [
         "🆕 <b>New meeting added!</b>",
         f"<b>{meeting.topic}</b>",
         meeting.description or "",
-        f"📆 {when_local:%d %B at %H:%M}",
+        f"📆 {when}",
         f"👥 {participants} participant{'s' if participants != 1 else ''}",
     ]
     if meeting.location:

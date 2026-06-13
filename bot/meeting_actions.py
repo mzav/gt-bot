@@ -13,12 +13,15 @@ def resolve_meeting_actions(
     available: int,
     waitlist_state: WaitlistState,
     include_register: bool,
+    registration_open: bool = True,
 ) -> str:
     """Return action key for keyboard builder."""
     if is_host:
         return "host"
     if is_participant:
         return "participant"
+    if not registration_open:
+        return "guest"
     if include_register and available > 0:
         return "register"
     if waitlist_state == "waiting":

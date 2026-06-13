@@ -49,12 +49,16 @@ async def create_meeting(
     *,
     max_participants: int = 2,
     start_at_utc: datetime | None = None,
+    end_at_utc: datetime | None = None,
+    registration_starts_at_utc: datetime | None = None,
 ) -> int:
     meeting = await db.create_meeting(
         host_id=host_id,
         topic="Test Meeting",
         description="Test description",
         start_at_utc=start_at_utc or datetime(2026, 7, 1, 18, 0, 0, tzinfo=timezone.utc),
+        end_at_utc=end_at_utc,
+        registration_starts_at_utc=registration_starts_at_utc,
         max_participants=max_participants,
         location="Berlin",
     )
