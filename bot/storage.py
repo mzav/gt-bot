@@ -353,7 +353,15 @@ class Database:
             )
             return res.scalar_one_or_none() is not None
 
-    async def unregister(self, meeting_id: int, user_id: int) -> tuple[bool, str]:
+    async def unregister(
+        self,
+        meeting_id: int,
+        user_id: int,
+        *,
+        reason_type: str | None = None,
+        reason_text: str | None = None,
+        cancelled_at: datetime | None = None,
+    ) -> tuple[bool, str]:
         """Cancel a user's confirmed registration for a meeting."""
         async with self.session() as s:
             res = await s.execute(
@@ -367,8 +375,28 @@ class Database:
             if not reg:
                 return False, "You are not registered."
             reg.status = RegistrationStatus.CANCELED
+            reg.cancelled_at = cancelled_at or datetime.now(timezone.utc)
+            reg.cancellation_reason_type = reason_type
+            reg.cancellation_reason_text = reason_text if reason_type == "other" else None
             await s.commit()
             return True, "You have been unregistered."
+
+    async def get_canceled_registration(
+        self, meeting_id: int, user_id: int
+    ) -> Registration | None:
+        """Return the most recent canceled registration for a user and meeting."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(Registration)
+                .where(
+                    Registration.meeting_id == meeting_id,
+                    Registration.user_id == user_id,
+                    Registration.status == RegistrationStatus.CANCELED,
+                )
+                .order_by(Registration.cancelled_at.desc())
+                .limit(1)
+            )
+            return res.scalar_one_or_none()
 
     async def list_meeting_participants(self, meeting_id: int) -> Sequence[Registration]:
         """Return confirmed registrations for a meeting."""

@@ -54,6 +54,21 @@ async def _run_migrations(engine, db: Database) -> None:
             await conn.commit()
         except OperationalError:
             pass
+        try:
+            await conn.execute(text("ALTER TABLE registrations ADD COLUMN cancellation_reason_type VARCHAR(32)"))
+            await conn.commit()
+        except OperationalError:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE registrations ADD COLUMN cancellation_reason_text VARCHAR(500)"))
+            await conn.commit()
+        except OperationalError:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE registrations ADD COLUMN cancelled_at DATETIME"))
+            await conn.commit()
+        except OperationalError:
+            pass
 
     backfilled = await db.backfill_meeting_public_tokens()
     if backfilled:
