@@ -60,6 +60,23 @@ from .main_menu import (
     menu_label_filter,
     remove_main_menu_keyboard,
 )
+from .registration_confirmation import (
+    build_cancelled_keyboard,
+    build_full_keyboard,
+    build_offer_confirm_keyboard,
+    build_step1_keyboard,
+    build_step2_keyboard,
+    build_step3_keyboard,
+    build_unavailable_keyboard,
+    format_cancelled,
+    format_full,
+    format_offer_short_confirm,
+    format_step1,
+    format_step2,
+    format_step3,
+    format_unavailable,
+    preflight_registration,
+)
 
 _CAPTION_LIMIT = 1024
 
@@ -141,6 +158,12 @@ class BotApp:
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("unregister", self.cmd_unregister))
         app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s1_yes, pattern=r"^reg_s1_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s1_no, pattern=r"^reg_s1_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s2_yes, pattern=r"^reg_s2_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s2_no, pattern=r"^reg_s2_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s3_yes, pattern=r"^reg_s3_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_s3_no, pattern=r"^reg_s3_no:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_details, pattern=r"^details:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_participants, pattern=r"^participants:\d+$"))
         app.add_handler(self._build_edit_meeting_handler())
@@ -155,6 +178,7 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_waitlist_cancel, pattern=r"^waitlist_cancel:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_waitlist_view, pattern=r"^waitlist:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_accept, pattern=r"^offer_accept:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_offer_confirm, pattern=r"^offer_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_decline, pattern=r"^offer_decline:\d+$"))
         app.add_handler(MessageHandler(menu_label_filter(), self.handle_main_menu_text))
         app.add_handler(
@@ -375,6 +399,69 @@ class BotApp:
                 InlineKeyboardButton(text="Показать встречу", callback_data=f"details:{meeting_id}"),
             ],
         ])
+
+    @staticmethod
+    def _parse_callback_meeting_id(data: str) -> int | None:
+        try:
+            return int(data.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return None
+
+    async def _reply_preflight_error(self, message, meeting_id: int, error: str) -> None:
+        if error == format_full():
+            await message.reply_text(error, reply_markup=build_full_keyboard(meeting_id))
+        elif error == format_unavailable():
+            await message.reply_text(error, reply_markup=build_unavailable_keyboard())
+        else:
+            await message.reply_text(error)
+
+    async def _start_registration_flow(self, message, meeting_id: int, user_id: int) -> None:
+        result = await preflight_registration(
+            self.db, meeting_id, user_id, self.local_tz
+        )
+        if result.error:
+            await self._reply_preflight_error(message, meeting_id, result.error)
+            return
+        await message.reply_text(
+            format_step1(result.meeting, self.local_tz),
+            reply_markup=build_step1_keyboard(meeting_id),
+        )
+
+    async def _reply_registration_cancelled(self, message, meeting_id: int) -> None:
+        await message.reply_text(
+            format_cancelled(),
+            reply_markup=build_cancelled_keyboard(meeting_id),
+        )
+
+    async def _complete_registration(self, message, meeting_id: int, user_id: int, db_user: User) -> None:
+        ok, msg, reg_status = await self.db.register(
+            meeting_id, user_id, local_tz=self.local_tz
+        )
+        if ok and reg_status == RegistrationStatus.CONFIRMED:
+            await message.reply_text(msg)
+            meeting = await self.db.get_meeting(meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting_id)
+                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+                await self._send_google_calendar_offer(message, meeting, lang="en")
+            return
+        if msg == "Meeting is full. Join the waitlist if a spot opens.":
+            await message.reply_text(format_full(), reply_markup=build_full_keyboard(meeting_id))
+        elif msg == "Meeting not found or canceled.":
+            await message.reply_text(format_unavailable(), reply_markup=build_unavailable_keyboard())
+        else:
+            await message.reply_text(msg)
+
+    async def _complete_offer_accept(self, message, entry_id: int, user_id: int, db_user: User) -> None:
+        now_utc = datetime.now(tz.UTC)
+        result = await self.waitlist.accept_offer(entry_id, user_id, now_utc)
+        await message.reply_text(result.message)
+        if result.ok and result.entry:
+            meeting = await self.db.get_meeting(result.entry.meeting_id)
+            if meeting:
+                confirmed = await self.db.count_confirmed(meeting.id)
+                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
+                await self._send_google_calendar_offer(message, meeting, lang="en")
 
     async def _get_meeting_user_context(
         self, meeting_id: int, user_id: int | None, *, include_register: bool = True
@@ -1933,7 +2020,7 @@ class BotApp:
         user = update.effective_user
         if not user:
             return
-        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
         if not context.args:
             await update.effective_message.reply_text("Usage: /register <meeting_id>")
             return
@@ -1942,16 +2029,7 @@ class BotApp:
         except Exception:
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
-        ok, msg, reg_status = await self.db.register(
-            meeting_id, user.id, local_tz=self.local_tz
-        )
-        await update.effective_message.reply_text(msg)
-        if ok and reg_status == RegistrationStatus.CONFIRMED:
-            meeting = await self.db.get_meeting(meeting_id)
-            if meeting:
-                confirmed = await self.db.count_confirmed(meeting_id)
-                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
-                await self._send_google_calendar_offer(update.effective_message, meeting, lang="en")
+        await self._start_registration_flow(update.effective_message, meeting_id, user.id)
 
     async def cmd_unregister(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Unregister current user from a meeting by ID."""
@@ -1981,7 +2059,78 @@ class BotApp:
     # ========== Callback Query Handlers ==========
 
     async def cb_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle inline 'Записаться' button presses to register the user."""
+        """Handle inline 'Записаться' button — start mindful confirmation flow."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            await cq.message.reply_text("Invalid registration request.")
+            return
+        await self._start_registration_flow(cq.message, meeting_id, user.id)
+
+    async def cb_reg_s1_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        meeting = await self.db.get_meeting(meeting_id)
+        if meeting is None or meeting.canceled_at is not None:
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        await cq.message.reply_text(
+            format_step2(), reply_markup=build_step2_keyboard(meeting_id)
+        )
+
+    async def cb_reg_s1_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await self._reply_registration_cancelled(cq.message, meeting_id)
+
+    async def cb_reg_s2_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        meeting = await self.db.get_meeting(meeting_id)
+        if meeting is None or meeting.canceled_at is not None:
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        await cq.message.reply_text(
+            format_step3(), reply_markup=build_step3_keyboard(meeting_id)
+        )
+
+    async def cb_reg_s2_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await self._reply_registration_cancelled(cq.message, meeting_id)
+
+    async def cb_reg_s3_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
         if not cq:
             return
@@ -1990,23 +2139,32 @@ class BotApp:
         if not user:
             return
         db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        data = cq.data or ""
-        try:
-            _, meeting_id_str = data.split(":", 1)
-            meeting_id = int(meeting_id_str)
-        except Exception:
-            await cq.message.reply_text("Invalid registration request.")
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
             return
-        ok, msg, reg_status = await self.db.register(
-            meeting_id, user.id, local_tz=self.local_tz
-        )
-        await cq.message.reply_text(msg)
-        if ok and reg_status == RegistrationStatus.CONFIRMED:
-            meeting = await self.db.get_meeting(meeting_id)
-            if meeting:
-                confirmed = await self.db.count_confirmed(meeting_id)
-                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
-                await self._send_google_calendar_offer(cq.message, meeting, lang="en")
+        meeting = await self.db.get_meeting(meeting_id)
+        now_utc = datetime.now(tz.UTC)
+        if meeting is None or meeting.canceled_at is not None:
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        if not await self.db.is_meeting_open(meeting_id, now_utc):
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        await self._complete_registration(cq.message, meeting_id, user.id, db_user)
+
+    async def cb_reg_s3_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await self._reply_registration_cancelled(cq.message, meeting_id)
 
     async def cb_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Подробности' button presses to show meeting details."""
@@ -2394,17 +2552,39 @@ class BotApp:
         user = update.effective_user
         if not user:
             return
+        await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        try:
+            entry_id = int((cq.data or "").split(":", 1)[1])
+        except (IndexError, ValueError):
+            await cq.message.reply_text("Invalid offer request.")
+            return
+        entry = await self.db.get_waitlist_entry(entry_id)
+        if entry is None or entry.user_id != user.id:
+            await cq.message.reply_text("Предложение не найдено.")
+            return
+        if entry.status != WaitlistStatus.OFFERED:
+            await cq.message.reply_text("Предложение больше недействительно.")
+            return
+        await cq.message.reply_text(
+            format_offer_short_confirm(),
+            reply_markup=build_offer_confirm_keyboard(entry_id),
+        )
+
+    async def cb_offer_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
         db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
-        entry_id = int((cq.data or "").split(":", 1)[1])
-        now_utc = datetime.now(tz.UTC)
-        result = await self.waitlist.accept_offer(entry_id, user.id, now_utc)
-        await cq.message.reply_text(result.message)
-        if result.ok and result.entry:
-            meeting = await self.db.get_meeting(result.entry.meeting_id)
-            if meeting:
-                confirmed = await self.db.count_confirmed(meeting.id)
-                await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
-                await self._send_google_calendar_offer(cq.message, meeting, lang="en")
+        try:
+            entry_id = int((cq.data or "").split(":", 1)[1])
+        except (IndexError, ValueError):
+            await cq.message.reply_text("Invalid offer request.")
+            return
+        await self._complete_offer_accept(cq.message, entry_id, user.id, db_user)
 
     async def cb_offer_decline(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query

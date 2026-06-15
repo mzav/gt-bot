@@ -305,6 +305,9 @@ class Database:
             if m is None or m.canceled_at is not None:
                 return False, "Meeting not found or canceled.", None
             now_utc = datetime.now(timezone.utc)
+            start = ensure_utc(m.start_at_utc)
+            if start < now_utc:
+                return False, "Meeting not found or canceled.", None
             if not is_registration_open(m, now_utc):
                 tz_obj = local_tz
                 if tz_obj is None:
