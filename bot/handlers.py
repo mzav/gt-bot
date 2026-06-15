@@ -64,6 +64,9 @@ from .registration_confirmation import (
     build_cancelled_keyboard,
     build_full_keyboard,
     build_offer_confirm_keyboard,
+    build_offer_overlap_confirm_keyboard,
+    build_overlap_confirm_keyboard,
+    build_overlap_decline_keyboard,
     build_step1_keyboard,
     build_step2_keyboard,
     build_step3_keyboard,
@@ -71,12 +74,16 @@ from .registration_confirmation import (
     format_cancelled,
     format_full,
     format_offer_short_confirm,
+    format_overlap_confirm,
+    format_overlap_declined,
+    format_overlapping_meetings_summary,
     format_step1,
     format_step2,
     format_step3,
     format_unavailable,
     preflight_registration,
 )
+from .meeting_overlap import find_overlapping_meetings
 from .cancellation_confirmation import (
     CancellationReasonType,
     LEAVE_OTHER_PENDING_KEY,
@@ -181,6 +188,8 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_reg_s2_no, pattern=r"^reg_s2_no:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_reg_s3_yes, pattern=r"^reg_s3_yes:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_reg_s3_no, pattern=r"^reg_s3_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_overlap_yes, pattern=r"^reg_overlap_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_reg_overlap_no, pattern=r"^reg_overlap_no:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_details, pattern=r"^details:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_participants, pattern=r"^participants:\d+$"))
         app.add_handler(self._build_edit_meeting_handler())
@@ -199,6 +208,8 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_offer_accept, pattern=r"^offer_accept:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_confirm, pattern=r"^offer_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_offer_decline, pattern=r"^offer_decline:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_offer_overlap_yes, pattern=r"^offer_overlap_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_offer_overlap_no, pattern=r"^offer_overlap_no:\d+$"))
         app.add_handler(MessageHandler(menu_label_filter(), self.handle_main_menu_text))
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_unknown_text),
@@ -433,6 +444,25 @@ class BotApp:
             await message.reply_text(error, reply_markup=build_unavailable_keyboard())
         else:
             await message.reply_text(error)
+
+    async def _find_registration_overlaps(self, user_id: int, meeting: Meeting, now_utc) -> list[Meeting]:
+        return await find_overlapping_meetings(
+            self.db, user_id, meeting, self.local_tz, now_utc
+        )
+
+    async def _reply_overlap_confirm(
+        self, message, meeting: Meeting, user_id: int, now_utc, *, keyboard_builder
+    ) -> bool:
+        """Show overlap confirmation when conflicts exist. Returns True if shown."""
+        overlaps = await self._find_registration_overlaps(user_id, meeting, now_utc)
+        if not overlaps:
+            return False
+        summary = format_overlapping_meetings_summary(overlaps, self.local_tz)
+        await message.reply_text(
+            format_overlap_confirm(summary),
+            reply_markup=keyboard_builder(),
+        )
+        return True
 
     async def _start_registration_flow(self, message, meeting_id: int, user_id: int) -> None:
         result = await preflight_registration(
@@ -2280,7 +2310,54 @@ class BotApp:
                 format_unavailable(), reply_markup=build_unavailable_keyboard()
             )
             return
+        if await self._reply_overlap_confirm(
+            cq.message,
+            meeting,
+            user.id,
+            now_utc,
+            keyboard_builder=lambda: build_overlap_confirm_keyboard(meeting_id),
+        ):
+            return
         await self._complete_registration(cq.message, meeting_id, user.id, db_user)
+
+    async def cb_reg_overlap_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        result = await preflight_registration(
+            self.db, meeting_id, user.id, self.local_tz
+        )
+        if result.error:
+            await self._reply_preflight_error(cq.message, meeting_id, result.error)
+            return
+        now_utc = datetime.now(tz.UTC)
+        if not await self.db.is_meeting_open(meeting_id, now_utc):
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        await self._complete_registration(cq.message, meeting_id, user.id, db_user)
+
+    async def cb_reg_overlap_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await cq.message.reply_text(
+            format_overlap_declined(),
+            reply_markup=build_overlap_decline_keyboard(meeting_id),
+        )
 
     async def cb_reg_s3_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
@@ -2749,7 +2826,72 @@ class BotApp:
         except (IndexError, ValueError):
             await cq.message.reply_text("Invalid offer request.")
             return
+        entry = await self.db.get_waitlist_entry(entry_id)
+        if entry is None or entry.user_id != user.id:
+            await cq.message.reply_text("Предложение не найдено.")
+            return
+        meeting = await self.db.get_meeting(entry.meeting_id)
+        if meeting is None or meeting.canceled_at is not None:
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        now_utc = datetime.now(tz.UTC)
+        if await self._reply_overlap_confirm(
+            cq.message,
+            meeting,
+            user.id,
+            now_utc,
+            keyboard_builder=lambda: build_offer_overlap_confirm_keyboard(entry_id),
+        ):
+            return
         await self._complete_offer_accept(cq.message, entry_id, user.id, db_user)
+
+    async def cb_offer_overlap_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        user = update.effective_user
+        if not user:
+            return
+        db_user = await self.db.get_or_create_user(user.id, user.full_name, user.username)
+        try:
+            entry_id = int((cq.data or "").split(":", 1)[1])
+        except (IndexError, ValueError):
+            await cq.message.reply_text("Invalid offer request.")
+            return
+        entry = await self.db.get_waitlist_entry(entry_id)
+        if entry is None or entry.user_id != user.id:
+            await cq.message.reply_text("Предложение не найдено.")
+            return
+        meeting = await self.db.get_meeting(entry.meeting_id)
+        if meeting is None or meeting.canceled_at is not None:
+            await cq.message.reply_text(
+                format_unavailable(), reply_markup=build_unavailable_keyboard()
+            )
+            return
+        await self._complete_offer_accept(cq.message, entry_id, user.id, db_user)
+
+    async def cb_offer_overlap_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        try:
+            entry_id = int((cq.data or "").split(":", 1)[1])
+        except (IndexError, ValueError):
+            await cq.message.reply_text("Invalid offer request.")
+            return
+        entry = await self.db.get_waitlist_entry(entry_id)
+        meeting_id = entry.meeting_id if entry else 0
+        if meeting_id:
+            await cq.message.reply_text(
+                format_overlap_declined(),
+                reply_markup=build_overlap_decline_keyboard(meeting_id),
+            )
+        else:
+            await cq.message.reply_text(format_overlap_declined())
 
     async def cb_offer_decline(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query

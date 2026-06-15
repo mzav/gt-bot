@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from .meeting_format import format_meeting_time
 from .models import Meeting
 from .storage import is_registration_open
 from .utils import ensure_utc
@@ -81,6 +82,28 @@ def format_offer_short_confirm() -> str:
     )
 
 
+def format_overlapping_meetings_summary(meetings: list[Meeting], local_tz) -> str:
+    lines = []
+    for m in meetings:
+        when = format_meeting_time(m, local_tz, style="short")
+        lines.append(f"📌 {m.topic}\n📅 {when}")
+    return "\n\n".join(lines)
+
+
+def format_overlap_confirm(summary: str) -> str:
+    return (
+        "Похоже, у тебя уже есть встреча в это же время 🌿\n\n"
+        "Ты уже записана или являешься хостом другой встречи, которая пересекается по времени:\n\n"
+        f"{summary}\n\n"
+        "Пожалуйста, подтверди, что ты осознанно записываешься на две встречи, "
+        "которые проходят одновременно."
+    )
+
+
+def format_overlap_declined() -> str:
+    return "Всё хорошо 🌿 Лучше записаться тогда, когда ты уверена, что сможешь прийти."
+
+
 def build_step1_keyboard(meeting_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(text="Да, я свободна", callback_data=f"reg_s1_yes:{meeting_id}"),
@@ -126,6 +149,26 @@ def build_offer_confirm_keyboard(entry_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(text="Да, записаться", callback_data=f"offer_confirm:{entry_id}"),
         InlineKeyboardButton(text="Нет, спасибо", callback_data=f"offer_decline:{entry_id}"),
+    ]])
+
+
+def build_overlap_confirm_keyboard(meeting_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text="Я понимаю, продолжить", callback_data=f"reg_overlap_yes:{meeting_id}"),
+        InlineKeyboardButton(text="Вернуться ко встрече", callback_data=f"reg_overlap_no:{meeting_id}"),
+    ]])
+
+
+def build_overlap_decline_keyboard(meeting_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text="Вернуться ко встрече", callback_data=f"details:{meeting_id}"),
+    ]])
+
+
+def build_offer_overlap_confirm_keyboard(entry_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text="Я понимаю, продолжить", callback_data=f"offer_overlap_yes:{entry_id}"),
+        InlineKeyboardButton(text="Вернуться ко встрече", callback_data=f"offer_overlap_no:{entry_id}"),
     ]])
 
 
