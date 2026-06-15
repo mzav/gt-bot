@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
+from .access_control import has_community_access, is_channel_member
 from .config import Settings
 from .google_calendar import (
     build_calendar_offer,
@@ -37,6 +38,7 @@ from .meeting_notifications import (
     notify_participants,
     snapshot_meeting,
 )
+from .messages import RESTRICTED_ACCESS_MESSAGE
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
 from .storage import Database, is_registration_open
 from .scheduler import BotScheduler
@@ -173,43 +175,44 @@ class BotApp:
     def build(self) -> Application:
         """Create and configure the PTB Application with command handlers."""
         app = ApplicationBuilder().token(self.settings.telegram_bot_token).build()
+        G = self._community_gated
 
         app.add_handler(CommandHandler("force_summary", self.cmd_force_summary))
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))
-        app.add_handler(CommandHandler("upcoming_meetings", self.cmd_meetings))
-        app.add_handler(CommandHandler("my_meetings", self.cmd_my))
+        app.add_handler(CommandHandler("upcoming_meetings", G(self.cmd_meetings)))
+        app.add_handler(CommandHandler("my_meetings", G(self.cmd_my)))
         app.add_handler(self._build_create_meeting_handler())
-        app.add_handler(CommandHandler("register", self.cmd_register))
-        app.add_handler(CommandHandler("unregister", self.cmd_unregister))
-        app.add_handler(CallbackQueryHandler(self.cb_register, pattern=r"^register:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s1_yes, pattern=r"^reg_s1_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s1_no, pattern=r"^reg_s1_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s2_yes, pattern=r"^reg_s2_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s2_no, pattern=r"^reg_s2_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s3_yes, pattern=r"^reg_s3_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_s3_no, pattern=r"^reg_s3_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_overlap_yes, pattern=r"^reg_overlap_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_reg_overlap_no, pattern=r"^reg_overlap_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_details, pattern=r"^details:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_participants, pattern=r"^participants:\d+$"))
+        app.add_handler(CommandHandler("register", G(self.cmd_register)))
+        app.add_handler(CommandHandler("unregister", G(self.cmd_unregister)))
+        app.add_handler(CallbackQueryHandler(G(self.cb_register), pattern=r"^register:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s1_yes), pattern=r"^reg_s1_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s1_no), pattern=r"^reg_s1_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_yes), pattern=r"^reg_s2_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_no), pattern=r"^reg_s2_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_yes), pattern=r"^reg_s3_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_no), pattern=r"^reg_s3_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_yes), pattern=r"^reg_overlap_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_no), pattern=r"^reg_overlap_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_details), pattern=r"^details:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_participants), pattern=r"^participants:\d+$"))
         app.add_handler(self._build_edit_meeting_handler())
-        app.add_handler(CallbackQueryHandler(self.cb_cancel_meeting, pattern=r"^cancel:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_cancel_confirm, pattern=r"^cancel_confirm:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_cancel_abort, pattern=r"^cancel_abort:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_meeting, pattern=r"^leave:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_reason, pattern=r"^leave_r:(ill|family|other):\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_other_abort, pattern=r"^leave_other_abort:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:(ill|family|other):\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_abort, pattern=r"^leave_abort:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_show_upcoming, pattern=r"^show_upcoming$"))
-        app.add_handler(CallbackQueryHandler(self.cb_waitlist_join, pattern=r"^waitlist_join:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_waitlist_cancel, pattern=r"^waitlist_cancel:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_waitlist_view, pattern=r"^waitlist:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_offer_accept, pattern=r"^offer_accept:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_offer_confirm, pattern=r"^offer_confirm:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_offer_decline, pattern=r"^offer_decline:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_offer_overlap_yes, pattern=r"^offer_overlap_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_offer_overlap_no, pattern=r"^offer_overlap_no:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_cancel_meeting), pattern=r"^cancel:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_cancel_confirm), pattern=r"^cancel_confirm:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_cancel_abort), pattern=r"^cancel_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_leave_meeting), pattern=r"^leave:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_leave_reason), pattern=r"^leave_r:(ill|family|other):\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_leave_other_abort), pattern=r"^leave_other_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_leave_confirm), pattern=r"^leave_confirm:(ill|family|other):\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_leave_abort), pattern=r"^leave_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_show_upcoming), pattern=r"^show_upcoming$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_waitlist_join), pattern=r"^waitlist_join:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_waitlist_cancel), pattern=r"^waitlist_cancel:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_waitlist_view), pattern=r"^waitlist:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_offer_accept), pattern=r"^offer_accept:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_offer_confirm), pattern=r"^offer_confirm:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_offer_decline), pattern=r"^offer_decline:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_offer_overlap_yes), pattern=r"^offer_overlap_yes:\d+$"))
+        app.add_handler(CallbackQueryHandler(G(self.cb_offer_overlap_no), pattern=r"^offer_overlap_no:\d+$"))
         app.add_handler(MessageHandler(menu_label_filter(), self.handle_main_menu_text))
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_unknown_text),
@@ -228,121 +231,123 @@ class BotApp:
 
     def _build_create_meeting_handler(self) -> ConversationHandler:
         """Build the conversation handler for interactive meeting creation."""
+        GC = lambda h: self._community_gated(h, conv=True)
         return ConversationHandler(
             entry_points=[
-                CommandHandler("create_meeting", self._create_meeting_start),
+                CommandHandler("create_meeting", GC(self._create_meeting_start)),
                 MessageHandler(
                     filters.Regex(f"^{re.escape(MENU_CREATE)}$"),
-                    self._create_meeting_start,
+                    GC(self._create_meeting_start),
                 ),
             ],
             states={
                 self.STATE_TOPIC: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_topic)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_topic))
                 ],
                 self.STATE_DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_description)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_description))
                 ],
                 self.STATE_MAX: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_max_members)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_max_members))
                 ],
                 self.STATE_LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_location)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_location))
                 ],
                 self.STATE_MONTH: [
-                    CallbackQueryHandler(self._create_meeting_month_callback, pattern=r"^month:")
+                    CallbackQueryHandler(GC(self._create_meeting_month_callback), pattern=r"^month:")
                 ],
                 self.STATE_DATE: [
-                    CallbackQueryHandler(self._create_meeting_calendar_callback, pattern=r"^cbcal_")
+                    CallbackQueryHandler(GC(self._create_meeting_calendar_callback), pattern=r"^cbcal_")
                 ],
                 self.STATE_HOUR: [
-                    CallbackQueryHandler(self._create_meeting_hour_callback, pattern=r"^hour:")
+                    CallbackQueryHandler(GC(self._create_meeting_hour_callback), pattern=r"^hour:")
                 ],
                 self.STATE_MINUTE: [
-                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^time:"),
-                    CallbackQueryHandler(self._create_meeting_minute_callback, pattern=r"^hour:back$"),
+                    CallbackQueryHandler(GC(self._create_meeting_minute_callback), pattern=r"^time:"),
+                    CallbackQueryHandler(GC(self._create_meeting_minute_callback), pattern=r"^hour:back$"),
                 ],
                 self.STATE_END_HOUR: [
-                    CallbackQueryHandler(self._create_meeting_end_hour_callback, pattern=r"^hour:"),
+                    CallbackQueryHandler(GC(self._create_meeting_end_hour_callback), pattern=r"^hour:"),
                 ],
                 self.STATE_END_MINUTE: [
-                    CallbackQueryHandler(self._create_meeting_end_minute_callback, pattern=r"^time:"),
-                    CallbackQueryHandler(self._create_meeting_end_minute_callback, pattern=r"^hour:back$"),
+                    CallbackQueryHandler(GC(self._create_meeting_end_minute_callback), pattern=r"^time:"),
+                    CallbackQueryHandler(GC(self._create_meeting_end_minute_callback), pattern=r"^hour:back$"),
                 ],
                 self.STATE_REG_START_CHOICE: [
-                    CallbackQueryHandler(self._create_reg_start_choice, pattern=r"^reg_start:"),
+                    CallbackQueryHandler(GC(self._create_reg_start_choice), pattern=r"^reg_start:"),
                 ],
                 self.STATE_PHOTO: [
-                    MessageHandler(filters.PHOTO, self._create_meeting_photo),
-                    CallbackQueryHandler(self._create_meeting_photo, pattern=r"^skip_photo$"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_meeting_photo_invalid),
+                    MessageHandler(filters.PHOTO, GC(self._create_meeting_photo)),
+                    CallbackQueryHandler(GC(self._create_meeting_photo), pattern=r"^skip_photo$"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_photo_invalid)),
                 ],
             },
-            fallbacks=[CommandHandler("cancel", self._create_meeting_cancel)],
+            fallbacks=[CommandHandler("cancel", GC(self._create_meeting_cancel))],
             allow_reentry=True,
         )
 
     def _build_edit_meeting_handler(self) -> ConversationHandler:
         """Build the conversation handler for editing a meeting."""
+        GC = lambda h: self._community_gated(h, conv=True)
         return ConversationHandler(
-            entry_points=[CallbackQueryHandler(self._edit_meeting_start, pattern=r"^edit:\d+$")],
+            entry_points=[CallbackQueryHandler(GC(self._edit_meeting_start), pattern=r"^edit:\d+$")],
             states={
                 self.STATE_EDIT_MENU: [
-                    CallbackQueryHandler(self._edit_select_topic, pattern=r"^edit_field:topic$"),
-                    CallbackQueryHandler(self._edit_select_description, pattern=r"^edit_field:description$"),
-                    CallbackQueryHandler(self._edit_select_max, pattern=r"^edit_field:max$"),
-                    CallbackQueryHandler(self._edit_select_location, pattern=r"^edit_field:location$"),
-                    CallbackQueryHandler(self._edit_select_datetime, pattern=r"^edit_field:datetime$"),
-                    CallbackQueryHandler(self._edit_select_endtime, pattern=r"^edit_field:endtime$"),
-                    CallbackQueryHandler(self._edit_select_regstart, pattern=r"^edit_field:regstart$"),
-                    CallbackQueryHandler(self._edit_select_photo, pattern=r"^edit_field:photo$"),
-                    CallbackQueryHandler(self._edit_reg_start_choice, pattern=r"^edit_reg_start:"),
-                    CallbackQueryHandler(self._edit_done, pattern=r"^edit_field:done$"),
+                    CallbackQueryHandler(GC(self._edit_select_topic), pattern=r"^edit_field:topic$"),
+                    CallbackQueryHandler(GC(self._edit_select_description), pattern=r"^edit_field:description$"),
+                    CallbackQueryHandler(GC(self._edit_select_max), pattern=r"^edit_field:max$"),
+                    CallbackQueryHandler(GC(self._edit_select_location), pattern=r"^edit_field:location$"),
+                    CallbackQueryHandler(GC(self._edit_select_datetime), pattern=r"^edit_field:datetime$"),
+                    CallbackQueryHandler(GC(self._edit_select_endtime), pattern=r"^edit_field:endtime$"),
+                    CallbackQueryHandler(GC(self._edit_select_regstart), pattern=r"^edit_field:regstart$"),
+                    CallbackQueryHandler(GC(self._edit_select_photo), pattern=r"^edit_field:photo$"),
+                    CallbackQueryHandler(GC(self._edit_reg_start_choice), pattern=r"^edit_reg_start:"),
+                    CallbackQueryHandler(GC(self._edit_done), pattern=r"^edit_field:done$"),
                 ],
                 self.STATE_EDIT_TOPIC: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_topic_handler)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_topic_handler))
                 ],
                 self.STATE_EDIT_DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_description_handler)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_description_handler))
                 ],
                 self.STATE_EDIT_MAX: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_max_handler)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_max_handler))
                 ],
                 self.STATE_EDIT_LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_location_handler)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_location_handler))
                 ],
                 self.STATE_EDIT_MONTH: [
-                    CallbackQueryHandler(self._edit_month_callback, pattern=r"^month:")
+                    CallbackQueryHandler(GC(self._edit_month_callback), pattern=r"^month:")
                 ],
                 self.STATE_EDIT_DATE: [
-                    CallbackQueryHandler(self._edit_calendar_callback, pattern=r"^cbcal_")
+                    CallbackQueryHandler(GC(self._edit_calendar_callback), pattern=r"^cbcal_")
                 ],
                 self.STATE_EDIT_HOUR: [
-                    CallbackQueryHandler(self._edit_hour_callback, pattern=r"^hour:")
+                    CallbackQueryHandler(GC(self._edit_hour_callback), pattern=r"^hour:")
                 ],
                 self.STATE_EDIT_MINUTE: [
-                    CallbackQueryHandler(self._edit_minute_callback, pattern=r"^time:"),
-                    CallbackQueryHandler(self._edit_minute_callback, pattern=r"^hour:back$"),
+                    CallbackQueryHandler(GC(self._edit_minute_callback), pattern=r"^time:"),
+                    CallbackQueryHandler(GC(self._edit_minute_callback), pattern=r"^hour:back$"),
                 ],
                 self.STATE_EDIT_END_HOUR: [
-                    CallbackQueryHandler(self._edit_end_hour_callback, pattern=r"^hour:"),
+                    CallbackQueryHandler(GC(self._edit_end_hour_callback), pattern=r"^hour:"),
                 ],
                 self.STATE_EDIT_END_MINUTE: [
-                    CallbackQueryHandler(self._edit_end_minute_callback, pattern=r"^time:"),
-                    CallbackQueryHandler(self._edit_end_minute_callback, pattern=r"^hour:back$"),
+                    CallbackQueryHandler(GC(self._edit_end_minute_callback), pattern=r"^time:"),
+                    CallbackQueryHandler(GC(self._edit_end_minute_callback), pattern=r"^hour:back$"),
                 ],
                 self.STATE_EDIT_REG_START_CHOICE: [
-                    CallbackQueryHandler(self._edit_reg_start_choice, pattern=r"^edit_reg_start:"),
+                    CallbackQueryHandler(GC(self._edit_reg_start_choice), pattern=r"^edit_reg_start:"),
                 ],
                 self.STATE_EDIT_PHOTO: [
-                    MessageHandler(filters.PHOTO, self._edit_photo_handler),
-                    CallbackQueryHandler(self._edit_photo_handler, pattern=r"^edit_photo:"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._edit_photo_invalid),
+                    MessageHandler(filters.PHOTO, GC(self._edit_photo_handler)),
+                    CallbackQueryHandler(GC(self._edit_photo_handler), pattern=r"^edit_photo:"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_photo_invalid)),
                 ],
             },
             fallbacks=[
-                CommandHandler("cancel", self._edit_cancel),
-                CallbackQueryHandler(self._edit_done, pattern=r"^edit_field:done$"),
+                CommandHandler("cancel", GC(self._edit_cancel)),
+                CallbackQueryHandler(GC(self._edit_done), pattern=r"^edit_field:done$"),
             ],
             allow_reentry=True,
             per_message=False,
@@ -350,6 +355,50 @@ class BotApp:
 
     def _is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.settings.admin_user_ids
+
+    async def _user_has_community_access(
+        self, user_id: int, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        if self._is_admin(user_id):
+            return True
+        channel_id = self.settings.announcements_channel_id
+        if not channel_id:
+            logger.warning("Community access denied: announcements channel not configured")
+            return False
+        is_member = await is_channel_member(context.bot, channel_id, user_id)
+        return has_community_access(self.settings, user_id, is_member=is_member)
+
+    async def _send_restricted_access(self, update: Update) -> None:
+        cq = update.callback_query
+        if cq is not None:
+            await cq.answer()
+            message = cq.message
+        else:
+            message = update.effective_message
+        if not message:
+            return
+        await message.reply_text(
+            RESTRICTED_ACCESS_MESSAGE,
+            reply_markup=remove_main_menu_keyboard(),
+        )
+
+    async def _ensure_community_access(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        user = update.effective_user
+        if not user:
+            return False
+        if await self._user_has_community_access(user.id, context):
+            return True
+        await self._send_restricted_access(update)
+        return False
+
+    def _community_gated(self, handler, *, conv: bool = False):
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if not await self._ensure_community_access(update, context):
+                return ConversationHandler.END if conv else None
+            return await handler(update, context)
+        return wrapped
 
     def _main_menu_markup(self, user_id: int | None):
         return build_main_menu_keyboard(is_admin=self._is_admin(user_id))
@@ -2055,6 +2104,10 @@ class BotApp:
         if not message:
             return
 
+        if not await self._user_has_community_access(user.id, context):
+            await self._send_restricted_access(update)
+            return
+
         if context.args:
             raw_payload = context.args[0] if len(context.args) == 1 else " ".join(context.args)
             payload = parse_start_payload(raw_payload)
@@ -2076,6 +2129,11 @@ class BotApp:
         if not message or not message.text:
             return
         text = message.text.strip()
+        if text == MENU_FORCE_SUMMARY:
+            await self.cmd_force_summary(update, context)
+            return
+        if not await self._ensure_community_access(update, context):
+            return
         if text == MENU_MEETINGS:
             await self.cmd_meetings(update, context)
         elif text == MENU_MY:
@@ -2083,13 +2141,15 @@ class BotApp:
         elif text == MENU_HELP:
             user = update.effective_user
             await self._send_welcome_message(message, user_id=user.id if user else None)
-        elif text == MENU_FORCE_SUMMARY:
-            await self.cmd_force_summary(update, context)
 
     async def handle_unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Reply to unrecognized plain text outside active conversations."""
         if context.user_data.get(LEAVE_OTHER_PENDING_KEY):
+            if not await self._ensure_community_access(update, context):
+                return
             await self._handle_leave_other_text(update, context)
+            return
+        if not await self._ensure_community_access(update, context):
             return
         message = update.effective_message
         if not message:

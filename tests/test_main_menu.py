@@ -10,6 +10,7 @@ from bot.handlers import BotApp
 from bot.main_menu import (
     ALL_MENU_LABELS,
     MENU_FORCE_SUMMARY,
+    MENU_HELP,
     MENU_MEETINGS,
     MENU_MY,
     USER_MENU_LABELS,
@@ -19,6 +20,9 @@ from bot.main_menu import (
 from telegram import Chat, Message, Update, User as TgUser
 
 
+from tests.conftest import TEST_CHANNEL_ID, make_context
+
+
 def _keyboard_button_texts(keyboard) -> list[str]:
     return [btn.text for row in keyboard.keyboard for btn in row]
 
@@ -26,6 +30,7 @@ def _keyboard_button_texts(keyboard) -> list[str]:
 def _make_app(*, admin_user_ids: list[int] | None = None) -> BotApp:
     settings = Settings(
         telegram_bot_token="test-token",
+        announcements_channel_id=TEST_CHANNEL_ID,
         admin_user_ids=admin_user_ids or [],
     )
     return BotApp(settings, MagicMock(), MagicMock(), MagicMock())
@@ -36,6 +41,17 @@ def _make_text_update(text: str, *, user_id: int = 1) -> Update:
     chat = Chat(id=user_id, type="private")
     message = Message(message_id=1, date=None, chat=chat, text=text, from_user=user)
     return Update(update_id=1, message=message)
+
+
+def _make_handler_text_update(text: str, *, user_id: int = 1):
+    user = TgUser(id=user_id, is_bot=False, first_name="Test")
+    message = MagicMock()
+    message.text = text
+    message.reply_text = AsyncMock()
+    update = MagicMock()
+    update.effective_user = user
+    update.effective_message = message
+    return update
 
 
 def test_keyboard_labels_for_regular_user():
@@ -74,18 +90,18 @@ async def test_handle_main_menu_text_routing():
     app.cmd_force_summary = AsyncMock()
     app._send_welcome_message = AsyncMock()
 
-    context = MagicMock()
+    context = make_context()
 
-    await app.handle_main_menu_text(_make_text_update(MENU_MEETINGS), context)
+    await app.handle_main_menu_text(_make_handler_text_update(MENU_MEETINGS), context)
     app.cmd_meetings.assert_awaited_once()
 
-    await app.handle_main_menu_text(_make_text_update(MENU_MY), context)
+    await app.handle_main_menu_text(_make_handler_text_update(MENU_MY), context)
     app.cmd_my.assert_awaited_once()
 
-    await app.handle_main_menu_text(_make_text_update(MENU_HELP), context)
+    await app.handle_main_menu_text(_make_handler_text_update(MENU_HELP), context)
     app._send_welcome_message.assert_awaited_once()
 
-    await app.handle_main_menu_text(_make_text_update(MENU_FORCE_SUMMARY), context)
+    await app.handle_main_menu_text(_make_handler_text_update(MENU_FORCE_SUMMARY), context)
     app.cmd_force_summary.assert_awaited_once()
 
 
@@ -95,9 +111,8 @@ async def test_force_summary_still_checks_admin():
     app.scheduler.run_announcement_now = AsyncMock()
     app.settings.announcements_channel_id = 123
 
-    update = _make_text_update(MENU_FORCE_SUMMARY, user_id=1)
+    update = _make_handler_text_update(MENU_FORCE_SUMMARY, user_id=1)
     message = update.effective_message
-    message.reply_text = AsyncMock()
 
     await app.cmd_force_summary(update, MagicMock())
 
@@ -107,11 +122,13 @@ async def test_force_summary_still_checks_admin():
 @pytest.mark.asyncio
 async def test_handle_unknown_text_replies_with_hint():
     app = _make_app()
-    update = _make_text_update("random words")
+    update = _make_handler_text_update("random words")
     message = update.effective_message
-    message.reply_text = AsyncMock()
 
-    await app.handle_unknown_text(update, MagicMock())
+    context = make_context()
+    context.user_data = {}
+
+    await app.handle_unknown_text(update, context)
 
     message.reply_text.assert_awaited_once()
     kwargs = message.reply_text.await_args.kwargs
