@@ -20,6 +20,13 @@ def generate_meeting_public_token(length: int = _PUBLIC_TOKEN_LENGTH) -> str:
     return "".join(secrets.choice(_PUBLIC_TOKEN_ALPHABET) for _ in range(length))
 
 
+def build_telegram_user_link(user_id: int, username: str | None = None) -> str:
+    """Build a link to a Telegram user profile."""
+    if username:
+        return f"https://t.me/{username.lstrip('@')}"
+    return f"tg://user?id={user_id}"
+
+
 def build_meeting_deep_link(bot_username: str, public_token: str) -> str:
     """Build a Telegram deep link that opens the bot for a specific meeting."""
     username = bot_username.lstrip("@")
@@ -49,6 +56,6 @@ def parse_start_payload(payload: str | None) -> StartPayload:
     return StartPayload(type="unknown", raw=payload)
 
 
-def meeting_channel_cta_keyboard(deep_link: str, *, label: str = "Записаться / Подробности") -> InlineKeyboardMarkup:
+def meeting_channel_cta_keyboard(deep_link: str, *, label: str = "Регистрация") -> InlineKeyboardMarkup:
     """Inline keyboard with a single URL button for channel announcements."""
     return InlineKeyboardMarkup([[InlineKeyboardButton(text=label, url=deep_link)]])

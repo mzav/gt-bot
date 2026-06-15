@@ -15,9 +15,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from dateutil import tz
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from .links import build_meeting_deep_link, meeting_channel_cta_keyboard
+from .links import build_meeting_deep_link, build_telegram_user_link, meeting_channel_cta_keyboard
 from .storage import Database
-from .meeting_format import format_meeting_time
+from .meeting_format import format_meeting_time, format_month_year_russian
 from .models import Meeting, User
 from .utils import ensure_utc
 
@@ -75,10 +75,43 @@ def _covered_by_future_announcement(meeting_date: date, today: date, announce_da
     return False
 
 
+def _format_spots_line(available: int, *, emoji: str = "🌻") -> str:
+    """Format the availability line for a digest card."""
+    if available <= 0:
+        return f"{emoji} Мест нет"
+    n = available
+    if n % 10 == 1 and n % 100 != 11:
+        word = "место"
+    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        word = "места"
+    else:
+        word = "мест"
+    return f"{emoji} {n} {word}"
+
+
+def _host_display_name(user: User) -> str:
+    if user.name:
+        return user.name
+    if user.username:
+        return f"@{user.username}"
+    return f"User#{user.id}"
+
+
+def _format_host_line(host: User) -> str:
+    name = _host_display_name(host)
+    link = build_telegram_user_link(host.id, host.username)
+    return f'Ведет <a href="{link}">{name}</a>.'
+
+
+def _format_organizer_line(host: User) -> str:
+    name = _host_display_name(host)
+    link = build_telegram_user_link(host.id, host.username)
+    return f'🤍 Организует <a href="{link}">{name}</a>'
+
+
 def _format_meeting_card(
     meeting: Meeting,
-    confirmed: int,
-    hosts: int,
+    available: int,
     host: User | None,
     local_tz,
     *,
@@ -88,14 +121,16 @@ def _format_meeting_card(
     when = format_meeting_time(meeting, local_tz, style="card")
     lines = [
         f"<b>{when}</b>",
-        f"<b>{meeting.topic}</b>",
-        f"Ведет {_display_name(host)}." if host else "",
-        f"🌻 Registered: {confirmed} / {meeting.max_participants} participants (+ведущих: {hosts})",
+        meeting.topic,
     ]
+    if host:
+        lines.append(_format_host_line(host))
+    lines.append(_format_spots_line(available))
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
     if deep_link:
-        lines.append(f'👉 <a href="{deep_link}">Записаться / Подробности</a>')
+        label = "Регистрация" if available > 0 else "Встать в waitlist"
+        lines.append(f'✏️<a href="{deep_link}">{label}</a>')
     return "\n".join(line for line in lines if line)
 
 
@@ -113,19 +148,24 @@ def _format_today_card(meeting: Meeting, participants: int, local_tz) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _format_new_meeting_card(meeting: Meeting, participants: int, local_tz) -> str:
+def _format_new_meeting_card(
+    meeting: Meeting,
+    available: int,
+    host: User | None,
+    local_tz,
+) -> str:
     """Format an immediate announcement for a newly created meeting (HTML)."""
-    when = format_meeting_time(meeting, local_tz, style="card_new")
-    lines = [
-        "🆕 <b>New meeting added!</b>",
-        f"<b>{meeting.topic}</b>",
-        meeting.description or "",
-        f"📆 {when}",
-        f"👥 {participants} participant{'s' if participants != 1 else ''}",
-    ]
+    when = format_meeting_time(meeting, local_tz, style="announce")
+    parts = [f"<i>{when}</i>", "", f"<b>{meeting.topic}</b>"]
+    if meeting.description:
+        parts.extend(["", meeting.description])
+    parts.append("")
+    if host:
+        parts.append(f"<i>{_format_organizer_line(host)}</i>")
+    parts.append(f"<i>{_format_spots_line(available, emoji='🌼')}</i>")
     if meeting.location:
-        lines.append(f"📍 {meeting.location}")
-    return "\n".join(line for line in lines if line)
+        parts.append(f"<i>📍 {meeting.location}</i>")
+    return "\n".join(parts)
 
 
 def _split_messages(header: str, cards: list[str], max_len: int = _TG_MAX_MESSAGE_LEN) -> list[str]:
@@ -297,21 +337,22 @@ class BotScheduler:
 
         meetings: Sequence[Meeting] = await self.db.list_meetings_in_range(from_utc, to_utc)
 
-        month_name = from_date.strftime("%B %Y")
-        header = f"📅 <b>Meetings — {month_name}</b>"
+        month_name = format_month_year_russian(
+            datetime.combine(from_date, time.min).replace(tzinfo=self._tz)
+        )
+        header = f"📅 <b>Встречи — {month_name}</b>"
 
         if not meetings:
-            await self._send_channel_card(channel_id, f"{header}\n\nNo meetings scheduled.", None)
+            await self._send_channel_card(channel_id, f"{header}\n\nНет запланированных встреч.", None)
             return
 
         cards = []
         for m in meetings:
-            confirmed = await self.db.count_confirmed(m.id)
-            hosts = await self.db.count_hosts(m.id)
+            available = await self.db.available_spots(m.id)
             host = await self.db.get_user(m.created_by)
             cards.append(
                 _format_meeting_card(
-                    m, confirmed, hosts, host, self._tz, deep_link=self._meeting_deep_link(m)
+                    m, available, host, self._tz, deep_link=self._meeting_deep_link(m)
                 )
             )
 
@@ -440,10 +481,11 @@ class BotScheduler:
         today = datetime.now(self._tz).date()
         if _covered_by_future_announcement(meeting_date, today, self._announce_days):
             return
-        participants = await self.db.count_confirmed(meeting.id)
+        available = await self.db.available_spots(meeting.id)
+        host = await self.db.get_user(meeting.created_by)
         await self._send_channel_card(
             self._channel_id,
-            _format_new_meeting_card(meeting, participants, self._tz),
+            _format_new_meeting_card(meeting, available, host, self._tz),
             meeting.photo_file_id,
             reply_markup=self._meeting_cta_keyboard(meeting),
         )

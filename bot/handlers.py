@@ -1,6 +1,7 @@
 """Telegram command handlers and application builder for the bot."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from datetime import datetime, date, timedelta
@@ -8,6 +9,7 @@ from typing import Literal
 
 from dateutil import tz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -38,12 +40,12 @@ from .meeting_notifications import (
     notify_participants,
     snapshot_meeting,
 )
-from .messages import RESTRICTED_ACCESS_MESSAGE
+from .messages import RESTRICTED_ACCESS_MESSAGE, WELCOME_MESSAGE
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
 from .storage import Database, is_registration_open
 from .scheduler import BotScheduler
 from .waitlist import WaitlistService, OfferNotification, send_offer_dms
-from .utils import ensure_utc
+from .utils import ensure_utc, message_text_as_html
 from .keyboards import (
     MeetingCalendar,
     MonthPickerKeyboard,
@@ -290,7 +292,10 @@ class BotApp:
         """Build the conversation handler for editing a meeting."""
         GC = lambda h: self._community_gated(h, conv=True)
         return ConversationHandler(
-            entry_points=[CallbackQueryHandler(GC(self._edit_meeting_start), pattern=r"^edit:\d+$")],
+            entry_points=[
+                CallbackQueryHandler(GC(self._edit_meeting_start), pattern=r"^edit:\d+$"),
+                CallbackQueryHandler(GC(self._edit_done), pattern=r"^edit_field:done$"),
+            ],
             states={
                 self.STATE_EDIT_MENU: [
                     CallbackQueryHandler(GC(self._edit_select_topic), pattern=r"^edit_field:topic$"),
@@ -404,7 +409,9 @@ class BotApp:
         return build_main_menu_keyboard(is_admin=self._is_admin(user_id))
 
     async def _hide_main_menu(self, message) -> None:
-        await message.reply_text("\u200b", reply_markup=remove_main_menu_keyboard())
+        sent = await message.reply_text(".", reply_markup=remove_main_menu_keyboard())
+        with contextlib.suppress(TelegramError):
+            await sent.delete()
 
     def _build_meeting_actions_keyboard(
         self,
@@ -523,6 +530,7 @@ class BotApp:
         await message.reply_text(
             format_step1(result.meeting, self.local_tz),
             reply_markup=build_step1_keyboard(meeting_id),
+            parse_mode="HTML",
         )
 
     async def _reply_registration_cancelled(self, message, meeting_id: int) -> None:
@@ -645,7 +653,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting_id)
                 await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
-                await self._send_google_calendar_offer(message, meeting, lang="en")
+                await self._send_google_calendar_offer(message, meeting, lang="ru")
             return
         if msg == "Meeting is full. Join the waitlist if a spot opens.":
             await message.reply_text(format_full(), reply_markup=build_full_keyboard(meeting_id))
@@ -663,7 +671,7 @@ class BotApp:
             if meeting:
                 confirmed = await self.db.count_confirmed(meeting.id)
                 await self.scheduler.on_participant_change(meeting, db_user, "joined", confirmed)
-                await self._send_google_calendar_offer(message, meeting, lang="en")
+                await self._send_google_calendar_offer(message, meeting, lang="ru")
 
     async def _get_meeting_user_context(
         self, meeting_id: int, user_id: int | None, *, include_register: bool = True
@@ -770,21 +778,8 @@ class BotApp:
 
     async def _send_welcome_message(self, message, *, user_id: int | None = None) -> None:
         """Send the default /start welcome text."""
-        msg = (
-            "🌸 Добро пожаловать в GirlTalkBot! 🌸\n\n"
-            "Я помогаю комьюнити Girl Talk легко создавать и вести встречи.\n\n"
-            "Основные действия — в меню ниже 👇\n\n"
-            "Доступные команды:\n"
-            "📝 /create_meeting — создать встречу topic | description | YYYY-MM-DD HH:MM | max | location\n"
-            "📅 /upcoming_meetings — все события\n"
-            "📗 /my_meetings — мои встречи\n"
-            "❓ /help — показать помощь\n\n"
-            "👉 Не забудь вступить в <a href='https://t.me/+8D9imfRpZDAxMDdi'>канал с анонсами</a> 👈\n\n"
-            "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
-            "Давай делать вместе организацию встреч проще! ✨"
-        )
         await message.reply_text(
-            msg,
+            WELCOME_MESSAGE,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=self._main_menu_markup(user_id),
@@ -893,10 +888,10 @@ class BotApp:
         return (
             f"{prefix}"
             f"✏️ <b>Редактирование встречи #{meeting.id}</b>\n\n"
-            f"📌 Тема: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
+            f"📌 Тема: {meeting.topic}\n\n"
+            f"📝 Описание: {meeting.description}\n\n"
             f"📅 Дата и время: {when}\n"
-            f"🔓 Начало регистрации: {reg_start}\n"
+            f"🔓 Регистрация откроется: {reg_start}\n"
             f"👥 Макс. участников: {meeting.max_participants}\n"
             f"📍 Место: {meeting.location or 'не указано'}\n"
             f"{photo_line}\n\n"
@@ -944,7 +939,8 @@ class BotApp:
             reply_markup=self._build_edit_menu_keyboard(),
             parse_mode="HTML",
         )
-        await self._hide_main_menu(cq.message)
+        with contextlib.suppress(TelegramError):
+            await self._hide_main_menu(cq.message)
         return self.STATE_EDIT_MENU
 
     async def _edit_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -954,6 +950,10 @@ class BotApp:
             await cq.answer()
 
         meeting_id = context.user_data.get("edit_meeting_id")
+        if not meeting_id and cq and cq.message and cq.message.text:
+            match = re.search(r"#(\d+)", cq.message.text)
+            if match:
+                meeting_id = int(match.group(1))
         if meeting_id:
             meeting = await self.db.get_meeting(meeting_id)
             if meeting:
@@ -973,14 +973,16 @@ class BotApp:
                             bot_username=self.bot_username,
                         )
                 when = format_meeting_time(meeting, self.local_tz, style="short")
+                reg_start = format_registration_start(meeting, self.local_tz)
                 photo_line = f"\n🖼 Фото: {'есть' if meeting.photo_file_id else 'нет'}"
                 text = (
                     f"✅ Редактирование встречи #{meeting_id} завершено.\n\n"
-                    f"📌 Тема: {meeting.topic}\n"
-                    f"📝 Описание: {meeting.description}\n"
+                    f"📌 Тема: {meeting.topic}\n\n"
+                    f"📝 Описание: {meeting.description}\n\n"
                     f"📅 Дата и время: {when}\n"
-                    f"👥 Макс. участников: {meeting.max_participants}\n"
-                    f"📍 Место: {meeting.location or 'не указано'}"
+                    f"🔓 Регистрация откроется: {reg_start}\n"
+                    f"📍 Место: {meeting.location or 'не указано'}\n"
+                    f"👥 Макс. участников: {meeting.max_participants}"
                     f"{photo_line}"
                     f"{gcal_update_reminder('ru')}"
                 )
@@ -1241,11 +1243,12 @@ class BotApp:
 
     async def _edit_description_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle new description input."""
-        description = (update.effective_message.text or "").strip()
-        if not description:
+        message = update.effective_message
+        if not (message.text or "").strip():
             await update.effective_message.reply_text("Описание не может быть пустым. Введи новое описание:")
             return self.STATE_EDIT_DESCRIPTION
 
+        description = message_text_as_html(message)
         meeting_id = context.user_data.get("edit_meeting_id")
         if not meeting_id:
             await update.effective_message.reply_text("Сессия истекла. Начни редактирование заново.")
@@ -1304,7 +1307,8 @@ class BotApp:
 
     async def _edit_location_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle new location input."""
-        raw = (update.effective_message.text or "").strip()
+        message = update.effective_message
+        raw = (message.text or "").strip()
         meeting_id = context.user_data.get("edit_meeting_id")
 
         if not meeting_id:
@@ -1315,7 +1319,7 @@ class BotApp:
         if raw.lower() in skip_values:
             meeting = await self.db.update_meeting(meeting_id, clear_location=True)
         else:
-            meeting = await self.db.update_meeting(meeting_id, location=raw)
+            meeting = await self.db.update_meeting(meeting_id, location=message_text_as_html(message))
         if not meeting:
             await update.effective_message.reply_text("Встреча не найдена.")
             return ConversationHandler.END
@@ -1644,11 +1648,11 @@ class BotApp:
         return self.STATE_DESCRIPTION
 
     async def _create_meeting_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        desc = (update.effective_message.text or "").strip()
-        if not desc:
+        message = update.effective_message
+        if not (message.text or "").strip():
             await update.effective_message.reply_text("Пожалуйста, напиши описание встречи")
             return self.STATE_DESCRIPTION
-        context.user_data["description"] = desc
+        context.user_data["description"] = message_text_as_html(message)
         await update.effective_message.reply_text(
             "Принято! Описание получено.\nПожалуйста, укажи максимальное количество участников для этой встречи, не включая ведущих.\nПример: 5"
         )
@@ -1672,16 +1676,17 @@ class BotApp:
         return self.STATE_LOCATION
 
     async def _create_meeting_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        raw = (update.effective_message.text or "").strip()
+        message = update.effective_message
+        raw = (message.text or "").strip()
         skip_values = {"", "-", "—", "пропустить", "нет"}
-        location = None if raw.lower() in skip_values else raw
+        location = None if raw.lower() in skip_values else message_text_as_html(message)
         context.user_data["location"] = location
-        received = "не указано" if not location else f"{location}"
-        # Show month picker for date selection
+        received = "не указано" if not location else location
         await update.effective_message.reply_text(
             f"Принято! Место проведения: {received}.\n\n"
             f"📅 Выбери месяц встречи:",
-            reply_markup=MonthPickerKeyboard.build()
+            reply_markup=MonthPickerKeyboard.build(),
+            parse_mode="HTML",
         )
         return self.STATE_MONTH
 
@@ -2046,14 +2051,16 @@ class BotApp:
         await self.scheduler.maybe_announce_new_meeting(meeting)
 
         when = format_meeting_time(meeting, self.local_tz, style="short")
+        reg_start = format_registration_start(meeting, self.local_tz)
         photo_line = "\n🖼 Фото: прикреплено" if photo_file_id else ""
         calendar_keyboard = self._google_calendar_keyboard(meeting, lang="ru")
         disclaimer = f"\n\n{gcal_disclaimer('ru')}" if calendar_keyboard else ""
         summary = (
             "✅ Спасибо! Встреча создана.\n\n"
-            f"📌 Название: {meeting.topic}\n"
-            f"📝 Описание: {meeting.description}\n"
+            f"📌 Название: {meeting.topic}\n\n"
+            f"📝 Описание: {meeting.description}\n\n"
             f"📅 Дата и время (Берлин): {when}\n"
+            f"🔓 Регистрация откроется: {reg_start}\n"
             f"📍 Место: {meeting.location or 'не указано'}\n"
             f"👥 Максимум участников: {meeting.max_participants}"
             f"{photo_line}\n"
@@ -2062,10 +2069,10 @@ class BotApp:
         )
         menu = self._main_menu_markup(user.id)
         if cq:
-            await cq.edit_message_text(summary, reply_markup=calendar_keyboard)
+            await cq.edit_message_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
             await cq.message.reply_text("Готово 👇", reply_markup=menu)
         else:
-            await update.message.reply_text(summary, reply_markup=calendar_keyboard)
+            await update.message.reply_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
             await update.message.reply_text("Готово 👇", reply_markup=menu)
 
         context.user_data.clear()
@@ -2156,7 +2163,7 @@ class BotApp:
             return
         user = update.effective_user
         await message.reply_text(
-            "Не понимаю. Выбери действие в меню или введи /help.",
+            f"Не понимаю. Выбери действие в меню или нажми {MENU_HELP}.",
             reply_markup=self._main_menu_markup(user.id if user else None),
         )
 
@@ -2468,11 +2475,11 @@ class BotApp:
         details_text = (
             f"<b>{m.topic}</b>\n"
             f"📝  {m.description}\n\n\n"
-            f"📅 Date: {date_str}\n"
-            f"🕐 Time: {time_str}\n"
-            f"📍 Location {m.location or 'TBA'}\n"
+            f"📅 {date_str}\n"
+            f"🕐 {time_str}\n"
+            f"📍 {m.location or 'TBA'}\n"
             f"👤 Ведет: {host_display}\n"
-            f"👥 Идет: {confirmed} / {m.max_participants} participants (+ведущих: {hosts})"
+            f"👥 Идет: {confirmed} / {m.max_participants} участников (+ведущих: {hosts})"
         )
         user = update.effective_user
         calendar_keyboard = None
@@ -2480,9 +2487,9 @@ class BotApp:
             is_host = m.created_by == user.id
             is_participant = await self.db.is_registered(m.id, user.id)
             if can_offer_google_calendar(is_host=is_host, is_participant=is_participant):
-                calendar_keyboard = self._google_calendar_keyboard(m, lang="en")
+                calendar_keyboard = self._google_calendar_keyboard(m, lang="ru")
                 if calendar_keyboard:
-                    details_text += f"\n\n{gcal_disclaimer('en')}"
+                    details_text += f"\n\n{gcal_disclaimer('ru')}"
             entry = await self.db.get_active_waitlist_entry(m.id, user.id)
             if entry:
                 position = await self.db.get_queue_position(entry.id) if entry.status == WaitlistStatus.WAITING else None

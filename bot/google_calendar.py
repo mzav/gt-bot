@@ -8,6 +8,7 @@ from urllib.parse import quote, urlencode
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .links import build_meeting_deep_link
+from .utils import telegram_html_to_plain
 from .models import Meeting
 from .utils import ensure_utc
 
@@ -21,7 +22,7 @@ GCAL_ADD_DISCLAIMER_EN = (
 )
 GCAL_ADD_DISCLAIMER_RU = (
     "Это создаёт личную копию в Google Calendar. "
-    "Если встреча изменится, обновите или удалите запись вручную."
+    "Если встреча изменится, обновите или удалите запись вручную. 👇"
 )
 GCAL_UPDATE_REMINDER_EN = (
     "\n\nIf you added this meeting to Google Calendar, update or remove the event manually."
@@ -69,7 +70,7 @@ def build_google_calendar_description(
     """Compose the Google Calendar event description from meeting data."""
     parts: list[str] = []
     if meeting.description and meeting.description.strip():
-        parts.append(meeting.description.strip())
+        parts.append(telegram_html_to_plain(meeting.description.strip()))
     if bot_username and meeting.public_token:
         try:
             link = build_meeting_deep_link(bot_username, meeting.public_token)
@@ -110,7 +111,7 @@ def build_google_calendar_event_url(
         params["details"] = description
 
     if meeting.location and meeting.location.strip():
-        params["location"] = meeting.location.strip()
+        params["location"] = telegram_html_to_plain(meeting.location.strip())
 
     return f"{_GCAL_BASE_URL}?{urlencode(params, quote_via=quote)}"
 

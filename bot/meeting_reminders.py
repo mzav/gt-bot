@@ -112,6 +112,7 @@ async def process_participant_reminders(
                         chat_id=user.id,
                         text=text,
                         reply_markup=keyboard,
+                        parse_mode="HTML",
                     )
                 except Exception:
                     log.exception(

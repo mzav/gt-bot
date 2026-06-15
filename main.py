@@ -134,11 +134,19 @@ async def main_async() -> None:
             else:
                 await application.bot.send_photo(chat_id=channel_id, photo=photo_file_id, reply_markup=reply_markup)
                 await application.bot.send_message(
-                    chat_id=channel_id, text=text, parse_mode="HTML", reply_markup=reply_markup
+                    chat_id=channel_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
                 )
         else:
             await application.bot.send_message(
-                chat_id=channel_id, text=text, parse_mode="HTML", reply_markup=reply_markup
+                chat_id=channel_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
             )
 
     # Scheduler (bot passed for host DM notifications)

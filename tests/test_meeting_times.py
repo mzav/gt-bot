@@ -7,7 +7,7 @@ import pytest
 from dateutil import tz
 
 from bot.google_calendar import effective_end_at_utc, DEFAULT_MEETING_DURATION
-from bot.meeting_format import format_meeting_time
+from bot.meeting_format import format_meeting_time, format_month_year_russian
 from bot.models import Meeting
 
 
@@ -34,6 +34,33 @@ def test_format_meeting_time_without_end(berlin_tz):
     meeting = _make_meeting()
     assert format_meeting_time(meeting, berlin_tz, style="iso") == "2026-07-01 18:00"
     assert format_meeting_time(meeting, berlin_tz, style="short") == "01.07.2026 18:00"
+
+
+def test_format_meeting_time_details_date_russian(berlin_tz):
+    meeting = _make_meeting(
+        start_at_utc=datetime(2026, 6, 16, 18, 0, 0, tzinfo=timezone.utc),
+    )
+    assert format_meeting_time(meeting, berlin_tz, style="details_date") == "вторник, 16 июня 2026"
+
+
+def test_format_meeting_time_card_russian(berlin_tz):
+    meeting = _make_meeting(
+        start_at_utc=datetime(2026, 8, 19, 17, 0, 0, tzinfo=timezone.utc),
+        end_at_utc=datetime(2026, 8, 19, 20, 0, 0, tzinfo=timezone.utc),
+    )
+    assert format_meeting_time(meeting, berlin_tz, style="card") == "19.08 (среда) 19:00 - 22:00"
+
+
+def test_format_meeting_time_announce_russian(berlin_tz):
+    meeting = _make_meeting(
+        start_at_utc=datetime(2026, 6, 17, 9, 15, 0, tzinfo=timezone.utc),
+        end_at_utc=datetime(2026, 6, 17, 11, 45, 0, tzinfo=timezone.utc),
+    )
+    assert format_meeting_time(meeting, berlin_tz, style="announce") == "Среда, 17 июня 11:15 - 13:45"
+
+
+def test_format_month_year_russian():
+    assert format_month_year_russian(datetime(2026, 6, 1)) == "июнь 2026"
 
 
 def test_format_meeting_time_with_end(berlin_tz):
