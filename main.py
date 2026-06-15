@@ -158,6 +158,7 @@ async def main_async() -> None:
     announce_conf = settings.announce_config()
     scheduler.schedule_announcements(announce_conf.days, announce_conf.time_of_day, settings.announcements_channel_id)
     scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
+    scheduler.schedule_participant_reminders(settings.daily_check_time_parsed())
     scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)
     scheduler.schedule_waitlist_expiration(settings.waitlist_offer_check_interval_minutes)
 

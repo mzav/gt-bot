@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime, Index
+from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -105,3 +105,17 @@ class WaitlistEntry(Base):
 
     meeting: Mapped[Meeting] = relationship("Meeting", back_populates="waitlist_entries")
     user: Mapped[User] = relationship("User", back_populates="waitlist_entries")
+
+
+class ParticipantReminder(Base):
+    """Tracks sent participant reminder DMs to prevent duplicates."""
+    __tablename__ = "participant_reminders"
+    __table_args__ = (
+        UniqueConstraint("meeting_id", "user_id", "offset_days", name="uq_participant_reminder"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    offset_days: Mapped[int] = mapped_column(Integer)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

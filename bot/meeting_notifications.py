@@ -84,7 +84,10 @@ def format_participant_update_message(
     return "\n".join(lines)
 
 
-def _build_update_keyboard(meeting: Meeting, bot_username: str | None) -> InlineKeyboardMarkup | None:
+def build_meeting_open_keyboard(
+    meeting: Meeting, bot_username: str | None
+) -> InlineKeyboardMarkup | None:
+    """Build a single URL button to open meeting details."""
     if not bot_username or not meeting.public_token:
         return None
     try:
@@ -94,6 +97,10 @@ def _build_update_keyboard(meeting: Meeting, bot_username: str | None) -> Inline
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("Открыть встречу", url=link),
     ]])
+
+
+def _build_update_keyboard(meeting: Meeting, bot_username: str | None) -> InlineKeyboardMarkup | None:
+    return build_meeting_open_keyboard(meeting, bot_username)
 
 
 async def notify_participants(

@@ -228,6 +228,29 @@ class BotScheduler:
             replace_existing=True,
         )
 
+    def schedule_participant_reminders(self, t: time) -> None:
+        """Schedule a daily job to send 7/3/1-day reminder DMs to participants."""
+        if not self._bot:
+            return
+        self.scheduler.add_job(
+            self._participant_reminders_job,
+            trigger=CronTrigger(hour=t.hour, minute=t.minute),
+            id="participant_reminders_job",
+            replace_existing=True,
+        )
+
+    async def _participant_reminders_job(self) -> None:
+        from .meeting_reminders import process_participant_reminders
+
+        if not self._bot:
+            return
+        await process_participant_reminders(
+            self._bot,
+            self.db,
+            self._tz,
+            self._bot_username,
+        )
+
     async def _daily_meeting_job(self, channel_id: int) -> None:
         """Send a separate announcement for each meeting scheduled today."""
         today_local = datetime.now(self._tz).date()
