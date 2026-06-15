@@ -80,6 +80,9 @@ class Registration(Base):
     status: Mapped[str] = mapped_column(String(20), default=RegistrationStatus.CONFIRMED, index=True)
     is_host: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    cancellation_reason_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    cancellation_reason_text: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     meeting: Mapped[Meeting] = relationship("Meeting", back_populates="registrations")
     user: Mapped[User] = relationship("User", back_populates="registrations")

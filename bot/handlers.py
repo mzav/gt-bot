@@ -77,6 +77,23 @@ from .registration_confirmation import (
     format_unavailable,
     preflight_registration,
 )
+from .cancellation_confirmation import (
+    CancellationReasonType,
+    LEAVE_OTHER_PENDING_KEY,
+    LEAVE_OTHER_TEXT_KEY,
+    MAX_OTHER_REASON_LEN,
+    build_final_confirm_keyboard,
+    build_other_reason_keyboard,
+    build_reason_keyboard,
+    build_stayed_keyboard,
+    format_final_confirm,
+    format_other_reason_prompt,
+    format_reason_prompt,
+    format_stayed_registered,
+    parse_leave_confirm_callback,
+    parse_leave_reason_callback,
+    preflight_leave,
+)
 
 _CAPTION_LIMIT = 1024
 
@@ -171,7 +188,9 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(self.cb_cancel_confirm, pattern=r"^cancel_confirm:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_cancel_abort, pattern=r"^cancel_abort:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_leave_meeting, pattern=r"^leave:\d+$"))
-        app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_reason, pattern=r"^leave_r:(ill|family|other):\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_other_abort, pattern=r"^leave_other_abort:\d+$"))
+        app.add_handler(CallbackQueryHandler(self.cb_leave_confirm, pattern=r"^leave_confirm:(ill|family|other):\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_leave_abort, pattern=r"^leave_abort:\d+$"))
         app.add_handler(CallbackQueryHandler(self.cb_show_upcoming, pattern=r"^show_upcoming$"))
         app.add_handler(CallbackQueryHandler(self.cb_waitlist_join, pattern=r"^waitlist_join:\d+$"))
@@ -431,6 +450,110 @@ class BotApp:
         await message.reply_text(
             format_cancelled(),
             reply_markup=build_cancelled_keyboard(meeting_id),
+        )
+
+    @staticmethod
+    def _clear_leave_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.pop(LEAVE_OTHER_PENDING_KEY, None)
+        context.user_data.pop(LEAVE_OTHER_TEXT_KEY, None)
+
+    async def _reply_leave_preflight_error(self, message, error: str) -> None:
+        if error == format_unavailable():
+            await message.reply_text(error, reply_markup=build_unavailable_keyboard())
+        else:
+            await message.reply_text(error)
+
+    async def _show_final_leave_confirm(
+        self,
+        message,
+        meeting_id: int,
+        reason_type: str,
+    ) -> None:
+        await message.reply_text(
+            format_final_confirm(),
+            reply_markup=build_final_confirm_keyboard(meeting_id, reason_type),
+        )
+
+    async def _complete_leave(
+        self,
+        message,
+        meeting_id: int,
+        user_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        reason_type: str,
+        reason_text: str | None = None,
+        edit: bool = False,
+    ) -> None:
+        ok, msg = await self.db.unregister(
+            meeting_id,
+            user_id,
+            reason_type=reason_type,
+            reason_text=reason_text,
+        )
+        self._clear_leave_pending(context)
+        if ok:
+            meeting = await self.db.get_meeting(meeting_id)
+            when = format_meeting_time(meeting, self.local_tz, style="short") if meeting else None
+            text = (
+                f"✅ Твоё участие в встрече #{meeting_id}"
+                + (f" «{meeting.topic}» ({when})" if meeting and when else "")
+                + " отменено."
+                + gcal_update_reminder("ru")
+            )
+            if edit:
+                await message.edit_message_text(text, parse_mode="HTML")
+            else:
+                await message.reply_text(text, parse_mode="HTML")
+            if meeting:
+                db_user = await self.db.get_user(user_id)
+                if db_user:
+                    confirmed = await self.db.count_confirmed(meeting_id)
+                    await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
+                await self._process_waitlist_after_unregister(meeting_id)
+        else:
+            err = f"Не удалось отменить участие: {msg}"
+            if edit:
+                await message.edit_message_text(err)
+            else:
+                await message.reply_text(err)
+
+    async def _handle_leave_other_text(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not user:
+            return
+        pending = context.user_data.get(LEAVE_OTHER_PENDING_KEY)
+        if not pending:
+            return
+        meeting_id = pending.get("meeting_id")
+        if meeting_id is None:
+            self._clear_leave_pending(context)
+            return
+
+        text = (message.text or "").strip()
+        if not text:
+            await message.reply_text("Пожалуйста, напиши короткую причину или нажми «Отмена».")
+            return
+        if len(text) > MAX_OTHER_REASON_LEN:
+            await message.reply_text(
+                f"Слишком длинно. Пожалуйста, уложись в {MAX_OTHER_REASON_LEN} символов."
+            )
+            return
+
+        result = await preflight_leave(self.db, meeting_id, user.id)
+        if result.error:
+            self._clear_leave_pending(context)
+            await self._reply_leave_preflight_error(message, result.error)
+            return
+
+        context.user_data[LEAVE_OTHER_TEXT_KEY] = text
+        await self._show_final_leave_confirm(
+            message, meeting_id, CancellationReasonType.OTHER
         )
 
     async def _complete_registration(self, message, meeting_id: int, user_id: int, db_user: User) -> None:
@@ -1935,6 +2058,9 @@ class BotApp:
 
     async def handle_unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Reply to unrecognized plain text outside active conversations."""
+        if context.user_data.get(LEAVE_OTHER_PENDING_KEY):
+            await self._handle_leave_other_text(update, context)
+            return
         message = update.effective_message
         if not message:
             return
@@ -2388,7 +2514,7 @@ class BotApp:
         await cq.edit_message_text(f"Отмена встречи #{meeting_id} отклонена. Встреча остаётся активной.")
 
     async def cb_leave_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle 'Отменить участие' button - show confirmation prompt."""
+        """Handle 'Отменить участие' button - start cancellation reason flow."""
         cq = update.callback_query
         if not cq:
             return
@@ -2398,37 +2524,71 @@ class BotApp:
         if not user:
             return
 
-        data = cq.data or ""
-        try:
-            _, meeting_id_str = data.split(":", 1)
-            meeting_id = int(meeting_id_str)
-        except Exception:
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
-        meeting = await self.db.get_meeting(meeting_id)
-        if not meeting:
-            await cq.message.reply_text("Встреча не найдена.")
+        self._clear_leave_pending(context)
+        result = await preflight_leave(self.db, meeting_id, user.id)
+        if result.error:
+            await self._reply_leave_preflight_error(cq.message, result.error)
             return
 
-        if not await self.db.is_registered(meeting_id, user.id):
-            await cq.message.reply_text("Ты не зарегистрирован(а) на эту встречу.")
-            return
-
-        when = format_meeting_time(meeting, self.local_tz, style="short")
-        confirmation_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(text="✅ Да, отменить участие", callback_data=f"leave_confirm:{meeting_id}"),
-                InlineKeyboardButton(text="❌ Нет, остаться", callback_data=f"leave_abort:{meeting_id}"),
-            ]
-        ])
-        text = (
-            f"⚠️ <b>Отмена участия в встрече #{meeting_id}</b>\n\n"
-            f"📌 {meeting.topic}\n"
-            f"📅 {when}\n\n"
-            "Ты уверен(а), что хочешь отменить своё участие?"
+        await cq.message.reply_text(
+            format_reason_prompt(result.meeting, self.local_tz),
+            reply_markup=build_reason_keyboard(meeting_id),
         )
-        await cq.message.reply_text(text, reply_markup=confirmation_keyboard, parse_mode="HTML")
+
+    async def cb_leave_reason(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle cancellation reason selection."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        user = update.effective_user
+        if not user:
+            return
+
+        parsed = parse_leave_reason_callback(cq.data or "")
+        if parsed is None:
+            await cq.message.reply_text("Ошибка: неверный запрос.")
+            return
+        reason_type, meeting_id = parsed
+
+        self._clear_leave_pending(context)
+        result = await preflight_leave(self.db, meeting_id, user.id)
+        if result.error:
+            await self._reply_leave_preflight_error(cq.message, result.error)
+            return
+
+        if reason_type == CancellationReasonType.OTHER:
+            context.user_data[LEAVE_OTHER_PENDING_KEY] = {"meeting_id": meeting_id}
+            await cq.message.reply_text(
+                format_other_reason_prompt(),
+                reply_markup=build_other_reason_keyboard(meeting_id),
+            )
+            return
+
+        await self._show_final_leave_confirm(cq.message, meeting_id, reason_type)
+
+    async def cb_leave_other_abort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Abort free-text cancellation reason entry."""
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+
+        self._clear_leave_pending(context)
+        await cq.message.reply_text(
+            format_stayed_registered(),
+            reply_markup=build_stayed_keyboard(meeting_id),
+        )
 
     async def cb_leave_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle confirmed participation cancellation."""
@@ -2441,50 +2601,55 @@ class BotApp:
         if not user:
             return
 
-        data = cq.data or ""
-        try:
-            _, meeting_id_str = data.split(":", 1)
-            meeting_id = int(meeting_id_str)
-        except Exception:
+        parsed = parse_leave_confirm_callback(cq.data or "")
+        if parsed is None:
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
+        reason_type, meeting_id = parsed
 
-        ok, msg = await self.db.unregister(meeting_id, user.id)
-        if ok:
-            meeting = await self.db.get_meeting(meeting_id)
-            when = format_meeting_time(meeting, self.local_tz, style="short") if meeting else None
-            text = (
-                f"✅ Твоё участие в встрече #{meeting_id}"
-                + (f" «{meeting.topic}» ({when})" if meeting and when else "")
-                + " отменено."
-                + gcal_update_reminder("ru")
-            )
-            await cq.edit_message_text(text, parse_mode="HTML")
-            if meeting:
-                db_user = await self.db.get_user(user.id)
-                if db_user:
-                    confirmed = await self.db.count_confirmed(meeting_id)
-                    await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
-                await self._process_waitlist_after_unregister(meeting_id)
-        else:
-            await cq.edit_message_text(f"Не удалось отменить участие: {msg}")
+        result = await preflight_leave(self.db, meeting_id, user.id)
+        if result.error:
+            self._clear_leave_pending(context)
+            await self._reply_leave_preflight_error(cq.message, result.error)
+            return
+
+        reason_text = None
+        if reason_type == CancellationReasonType.OTHER:
+            reason_text = context.user_data.get(LEAVE_OTHER_TEXT_KEY)
+            if not reason_text:
+                await cq.message.reply_text(
+                    "Не удалось найти причину отмены. Пожалуйста, начни снова со встречи.",
+                    reply_markup=build_stayed_keyboard(meeting_id),
+                )
+                return
+
+        await self._complete_leave(
+            cq.message,
+            meeting_id,
+            user.id,
+            context,
+            reason_type=reason_type,
+            reason_text=reason_text,
+            edit=True,
+        )
 
     async def cb_leave_abort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle abort of participation cancellation."""
+        """Handle abort of participation cancellation at final confirmation."""
         cq = update.callback_query
         if not cq:
             return
         await cq.answer()
 
-        data = cq.data or ""
-        try:
-            _, meeting_id_str = data.split(":", 1)
-            meeting_id = int(meeting_id_str)
-        except Exception:
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
-        await cq.edit_message_text(f"Отмена участия во встрече #{meeting_id} отклонена. Ты остаёшься участником.")
+        self._clear_leave_pending(context)
+        await cq.message.edit_message_text(
+            format_stayed_registered(),
+            reply_markup=build_stayed_keyboard(meeting_id),
+        )
 
     async def cb_waitlist_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
