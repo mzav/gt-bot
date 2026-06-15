@@ -16,7 +16,16 @@ from sqlalchemy.engine import Row
 
 from .links import generate_meeting_public_token
 from .messages import REGISTRATION_SUCCESS
-from .models import Base, User, Meeting, Registration, RegistrationStatus, WaitlistEntry, WaitlistStatus
+from .models import (
+    Base,
+    User,
+    Meeting,
+    Registration,
+    RegistrationStatus,
+    WaitlistEntry,
+    WaitlistStatus,
+    ParticipantReminder,
+)
 from .utils import ensure_utc
 
 log = logging.getLogger(__name__)
@@ -554,3 +563,36 @@ class Database:
                 )
             )
             return res.scalars().all()
+
+    async def has_participant_reminder(
+        self, meeting_id: int, user_id: int, offset_days: int
+    ) -> bool:
+        """Return True if a reminder of the given offset was already sent."""
+        async with self.session() as s:
+            res = await s.execute(
+                select(ParticipantReminder.id).where(
+                    ParticipantReminder.meeting_id == meeting_id,
+                    ParticipantReminder.user_id == user_id,
+                    ParticipantReminder.offset_days == offset_days,
+                )
+            )
+            return res.scalar_one_or_none() is not None
+
+    async def record_participant_reminder(
+        self,
+        meeting_id: int,
+        user_id: int,
+        offset_days: int,
+        sent_at: datetime,
+    ) -> None:
+        """Record a successfully sent participant reminder."""
+        async with self.session() as s:
+            s.add(
+                ParticipantReminder(
+                    meeting_id=meeting_id,
+                    user_id=user_id,
+                    offset_days=offset_days,
+                    sent_at=sent_at,
+                )
+            )
+            await s.commit()
