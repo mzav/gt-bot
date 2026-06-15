@@ -160,6 +160,23 @@ def test_build_description_only_link(berlin_tz):
     assert desc == "Meeting in bot: https://t.me/TestBot?start=m_abc123token"
 
 
+def test_build_description_strips_html_links(berlin_tz):
+    meeting = _make_meeting(
+        description='<a href="https://example.com">подробнее</a>',
+    )
+    desc = build_google_calendar_description(meeting, bot_username="TestBot")
+    assert "подробнее (https://example.com)" in desc
+
+
+def test_build_url_strips_html_location(berlin_tz):
+    meeting = _make_meeting(
+        location='<a href="https://maps.example.com">Cafe</a>',
+    )
+    url = build_google_calendar_event_url(meeting, local_tz=berlin_tz)
+    params = parse_qs(urlparse(url).query)
+    assert params["location"] == ["Cafe (https://maps.example.com)"]
+
+
 def test_can_offer_google_calendar():
     assert can_offer_google_calendar(is_host=True, is_participant=False) is True
     assert can_offer_google_calendar(is_host=False, is_participant=True) is True
