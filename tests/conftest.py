@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from dateutil import tz
@@ -9,6 +10,21 @@ from dateutil import tz
 from bot.models import WaitlistStatus
 from bot.storage import Database
 from bot.waitlist import WaitlistService
+
+TEST_CHANNEL_ID = -100123
+
+
+def make_context(*, status: str = "member", raise_error: Exception | None = None):
+    """Build a mock PTB context with get_chat_member configured."""
+    context = MagicMock()
+    context.user_data = {}
+    if raise_error is not None:
+        context.bot.get_chat_member = AsyncMock(side_effect=raise_error)
+    else:
+        member = MagicMock()
+        member.status = status
+        context.bot.get_chat_member = AsyncMock(return_value=member)
+    return context
 
 
 @pytest.fixture
@@ -47,6 +63,7 @@ async def create_meeting(
     db: Database,
     host_id: int,
     *,
+    topic: str = "Test Meeting",
     max_participants: int = 2,
     start_at_utc: datetime | None = None,
     end_at_utc: datetime | None = None,
@@ -54,7 +71,7 @@ async def create_meeting(
 ) -> int:
     meeting = await db.create_meeting(
         host_id=host_id,
-        topic="Test Meeting",
+        topic=topic,
         description="Test description",
         start_at_utc=start_at_utc or datetime(2026, 7, 1, 18, 0, 0, tzinfo=timezone.utc),
         end_at_utc=end_at_utc,

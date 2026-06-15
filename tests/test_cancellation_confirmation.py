@@ -19,7 +19,7 @@ from bot.cancellation_confirmation import (
 )
 from bot.config import Settings
 from bot.handlers import BotApp
-from tests.conftest import create_host, create_meeting, fill_meeting
+from tests.conftest import TEST_CHANNEL_ID, create_host, create_meeting, fill_meeting, make_context
 
 
 def _keyboard_callback_texts(keyboard) -> list[str]:
@@ -30,6 +30,7 @@ def _make_app(db, waitlist) -> BotApp:
     settings = Settings(
         telegram_bot_token="test-token",
         tz="Europe/Berlin",
+        announcements_channel_id=TEST_CHANNEL_ID,
     )
     scheduler = MagicMock()
     scheduler.on_participant_change = AsyncMock()
@@ -135,7 +136,7 @@ async def test_leave_other_text_proceeds_to_confirm(app, db):
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_id, 10)
 
-    context = MagicMock()
+    context = make_context()
     context.user_data = {LEAVE_OTHER_PENDING_KEY: {"meeting_id": meeting_id}}
 
     update = _make_text_update("Не успеваю по работе")
@@ -261,7 +262,7 @@ async def test_invalid_other_text_empty(app, db):
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_id, 10)
 
-    context = MagicMock()
+    context = make_context()
     context.user_data = {LEAVE_OTHER_PENDING_KEY: {"meeting_id": meeting_id}}
 
     update = _make_text_update("   ")
@@ -279,7 +280,7 @@ async def test_invalid_other_text_too_long(app, db):
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_id, 10)
 
-    context = MagicMock()
+    context = make_context()
     context.user_data = {LEAVE_OTHER_PENDING_KEY: {"meeting_id": meeting_id}}
 
     update = _make_text_update("x" * (MAX_OTHER_REASON_LEN + 1))
