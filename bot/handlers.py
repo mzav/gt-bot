@@ -589,7 +589,7 @@ class BotApp:
                 + gcal_update_reminder("ru")
             )
             if edit:
-                await message.edit_message_text(text, parse_mode="HTML")
+                await message.edit_text(text, parse_mode="HTML")
             else:
                 await message.reply_text(text, parse_mode="HTML")
             if meeting:
@@ -601,7 +601,7 @@ class BotApp:
         else:
             err = f"Не удалось отменить участие: {msg}"
             if edit:
-                await message.edit_message_text(err)
+                await message.edit_text(err)
             else:
                 await message.reply_text(err)
 
@@ -2790,7 +2790,7 @@ class BotApp:
             return
 
         self._clear_leave_pending(context)
-        await cq.message.edit_message_text(
+        await cq.edit_message_text(
             format_stayed_registered(),
             reply_markup=build_stayed_keyboard(meeting_id),
         )
