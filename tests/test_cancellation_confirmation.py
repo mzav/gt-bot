@@ -41,11 +41,12 @@ def _make_callback_update(callback_data: str, *, user_id: int = 10):
     user = TgUser(id=user_id, is_bot=False, first_name="Test")
     message = MagicMock()
     message.reply_text = AsyncMock()
-    message.edit_message_text = AsyncMock()
+    message.edit_text = AsyncMock()
     cq = MagicMock()
     cq.data = callback_data
     cq.message = message
     cq.answer = AsyncMock()
+    cq.edit_message_text = AsyncMock()
     update = MagicMock()
     update.callback_query = cq
     update.effective_user = user
@@ -209,9 +210,9 @@ async def test_leave_abort_keeps_registration(app, db):
     await app.cb_leave_abort(update, context)
 
     assert await db.is_registered(meeting_id, 10)
-    text = update.callback_query.message.edit_message_text.await_args.args[0]
+    text = update.callback_query.edit_message_text.await_args.args[0]
     assert text == format_stayed_registered()
-    kwargs = update.callback_query.message.edit_message_text.await_args.kwargs
+    kwargs = update.callback_query.edit_message_text.await_args.kwargs
     assert f"details:{meeting_id}" in _keyboard_callback_texts(kwargs["reply_markup"])
     assert LEAVE_OTHER_TEXT_KEY not in context.user_data
 
