@@ -33,6 +33,21 @@ HOUR_END = 23     # Last selectable hour
 HOURS_PER_ROW = 4  # Number of hour buttons per row
 MINUTE_OPTIONS = (0, 15, 30, 45)  # Available minute increments
 
+CONV_CANCEL_CALLBACK = "conv:cancel"
+CONV_CANCEL_LABEL = "Отмена"
+
+
+def append_cancel_row(
+    markup: InlineKeyboardMarkup,
+    *,
+    callback_data: str = CONV_CANCEL_CALLBACK,
+    label: str = CONV_CANCEL_LABEL,
+) -> InlineKeyboardMarkup:
+    """Append a cancel button row to an inline keyboard."""
+    rows = [list(row) for row in markup.inline_keyboard]
+    rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
+    return InlineKeyboardMarkup(rows)
+
 
 class MeetingCalendar(DetailedTelegramCalendar):
     """Calendar widget customized for meeting date selection.
@@ -73,7 +88,7 @@ class MonthPickerKeyboard:
                 InlineKeyboardButton(text=label, callback_data=callback_data)
             ])
         
-        return InlineKeyboardMarkup(buttons)
+        return append_cancel_row(InlineKeyboardMarkup(buttons))
     
     @staticmethod
     def parse_callback(data: str) -> tuple[int, int] | None:
@@ -131,8 +146,8 @@ class TimePickerKeyboard:
         if row:
             keyboard.append(row)
             
-        return InlineKeyboardMarkup(keyboard)
-    
+        return append_cancel_row(InlineKeyboardMarkup(keyboard))
+
     @staticmethod
     def build_minutes(hour: int) -> InlineKeyboardMarkup:
         """Build an inline keyboard with minute options for a selected hour.
@@ -156,16 +171,17 @@ class TimePickerKeyboard:
             callback_data="hour:back"
         )
         
-        return InlineKeyboardMarkup([
+        return append_cancel_row(InlineKeyboardMarkup([
             minute_buttons,
             [back_button],
-        ])
+        ]))
 
 
 def photo_skip_keyboard() -> InlineKeyboardMarkup:
-    """Skip button for the optional photo step during meeting creation."""
+    """Skip and cancel buttons for the optional photo step during meeting creation."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(text="Пропустить", callback_data="skip_photo"),
+        InlineKeyboardButton(text=CONV_CANCEL_LABEL, callback_data=CONV_CANCEL_CALLBACK),
     ]])
 
 

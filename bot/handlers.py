@@ -53,6 +53,8 @@ from .keyboards import (
     LSTEP_TRANSLATIONS,
     photo_skip_keyboard,
     edit_photo_keyboard,
+    append_cancel_row,
+    CONV_CANCEL_CALLBACK,
 )
 from .main_menu import (
     MENU_CREATE,
@@ -107,6 +109,9 @@ from .cancellation_confirmation import (
 )
 
 _CAPTION_LIMIT = 1024
+_CREATE_CANCEL_MESSAGE = "Создание встречи отменено."
+_EDIT_CANCEL_MESSAGE = "Редактирование отменено."
+_CONVERSATION_ESCAPE_HINT = "\n\nВ любой момент можно отменить: /cancel или кнопка «Отмена»."
 
 
 async def _reply_with_card(
@@ -284,7 +289,15 @@ class BotApp:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_photo_invalid)),
                 ],
             },
-            fallbacks=[CommandHandler("cancel", GC(self._create_meeting_cancel))],
+            fallbacks=[
+                CommandHandler("cancel", GC(self._create_meeting_cancel)),
+                CommandHandler(["start", "help"], GC(self._create_meeting_start_fallback)),
+                MessageHandler(menu_label_filter(), GC(self._create_meeting_menu_fallback)),
+                CallbackQueryHandler(
+                    GC(self._create_meeting_cancel_callback),
+                    pattern=f"^{re.escape(CONV_CANCEL_CALLBACK)}$",
+                ),
+            ],
             allow_reentry=True,
         )
 
@@ -352,7 +365,13 @@ class BotApp:
             },
             fallbacks=[
                 CommandHandler("cancel", GC(self._edit_cancel)),
+                CommandHandler(["start", "help"], GC(self._edit_start_fallback)),
+                MessageHandler(menu_label_filter(), GC(self._edit_menu_fallback)),
                 CallbackQueryHandler(GC(self._edit_done), pattern=r"^edit_field:done$"),
+                CallbackQueryHandler(
+                    GC(self._edit_cancel_callback),
+                    pattern=f"^{re.escape(CONV_CANCEL_CALLBACK)}$",
+                ),
             ],
             allow_reentry=True,
             per_message=False,
@@ -412,6 +431,108 @@ class BotApp:
         sent = await message.reply_text(".", reply_markup=remove_main_menu_keyboard())
         with contextlib.suppress(TelegramError):
             await sent.delete()
+
+    async def _restore_main_menu(self, message, user_id: int | None) -> None:
+        sent = await message.reply_text(".", reply_markup=self._main_menu_markup(user_id))
+        with contextlib.suppress(TelegramError):
+            await sent.delete()
+
+    async def _finish_conversation_cancel(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        message: str,
+    ) -> int:
+        context.user_data.clear()
+        user = update.effective_user
+        menu = self._main_menu_markup(user.id if user else None)
+        cq = update.callback_query
+        if cq:
+            await cq.answer()
+            with contextlib.suppress(TelegramError):
+                await cq.edit_message_text(message)
+            if cq.message:
+                await self._restore_main_menu(cq.message, user.id if user else None)
+        else:
+            effective = update.effective_message
+            if effective:
+                await effective.reply_text(message, reply_markup=menu)
+        return ConversationHandler.END
+
+    async def _create_meeting_start_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        context.user_data.clear()
+        user = update.effective_user
+        message = update.effective_message
+        if user and message:
+            await self.db.get_or_create_user(user.id, user.full_name, user.username)
+            await self._send_welcome_message(message, user_id=user.id)
+        return ConversationHandler.END
+
+    async def _create_meeting_menu_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        message = update.effective_message
+        if not message or not message.text:
+            return ConversationHandler.END
+        text = message.text.strip()
+        if text == MENU_CREATE:
+            return await self._create_meeting_start(update, context)
+        context.user_data.clear()
+        if text == MENU_MEETINGS:
+            await self.cmd_meetings(update, context)
+        elif text == MENU_MY:
+            await self.cmd_my(update, context)
+        elif text == MENU_HELP:
+            user = update.effective_user
+            await self._send_welcome_message(message, user_id=user.id if user else None)
+        return ConversationHandler.END
+
+    async def _create_meeting_cancel_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        return await self._finish_conversation_cancel(
+            update, context, message=_CREATE_CANCEL_MESSAGE
+        )
+
+    async def _edit_start_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        context.user_data.clear()
+        user = update.effective_user
+        message = update.effective_message
+        if user and message:
+            await self.db.get_or_create_user(user.id, user.full_name, user.username)
+            await self._send_welcome_message(message, user_id=user.id)
+        return ConversationHandler.END
+
+    async def _edit_menu_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        message = update.effective_message
+        if not message or not message.text:
+            return ConversationHandler.END
+        text = message.text.strip()
+        if text == MENU_CREATE:
+            return await self._create_meeting_start(update, context)
+        context.user_data.clear()
+        if text == MENU_MEETINGS:
+            await self.cmd_meetings(update, context)
+        elif text == MENU_MY:
+            await self.cmd_my(update, context)
+        elif text == MENU_HELP:
+            user = update.effective_user
+            await self._send_welcome_message(message, user_id=user.id if user else None)
+        return ConversationHandler.END
+
+    async def _edit_cancel_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        return await self._finish_conversation_cancel(
+            update, context, message=_EDIT_CANCEL_MESSAGE
+        )
 
     def _build_meeting_actions_keyboard(
         self,
@@ -935,7 +1056,7 @@ class BotApp:
         context.user_data["edit_meeting_id"] = meeting_id
         context.user_data["edit_snapshot"] = snapshot_meeting(meeting)
         await cq.message.reply_text(
-            self._format_edit_menu_text(meeting),
+            self._format_edit_menu_text(meeting) + _CONVERSATION_ESCAPE_HINT,
             reply_markup=self._build_edit_menu_keyboard(),
             parse_mode="HTML",
         )
@@ -987,15 +1108,14 @@ class BotApp:
                     f"{gcal_update_reminder('ru')}"
                 )
                 user = update.effective_user
-                menu = self._main_menu_markup(user.id if user else None)
                 if cq:
                     await cq.edit_message_text(text, parse_mode="HTML")
-                    await cq.message.reply_text("Готово 👇", reply_markup=menu)
+                    await self._restore_main_menu(cq.message, user.id if user else None)
                 else:
                     await update.effective_message.reply_text(
                         text,
                         parse_mode="HTML",
-                        reply_markup=menu,
+                        reply_markup=self._main_menu_markup(user.id if user else None),
                     )
 
         context.user_data.clear()
@@ -1003,13 +1123,9 @@ class BotApp:
 
     async def _edit_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Cancel the edit operation."""
-        context.user_data.clear()
-        user = update.effective_user
-        await update.effective_message.reply_text(
-            "Редактирование отменено.",
-            reply_markup=self._main_menu_markup(user.id if user else None),
+        return await self._finish_conversation_cancel(
+            update, context, message=_EDIT_CANCEL_MESSAGE
         )
-        return ConversationHandler.END
 
     # ----- Field selection handlers -----
 
@@ -1367,7 +1483,7 @@ class BotApp:
         day_label = "день открытия регистрации" if picking_reg else "новый день встречи"
         await query.edit_message_text(
             f"📅 Выбери {day_label}:",
-            reply_markup=calendar
+            reply_markup=append_cancel_row(calendar),
         )
         return self.STATE_EDIT_DATE
 
@@ -1400,7 +1516,7 @@ class BotApp:
             day_label = "день открытия регистрации" if picking_reg else "новый день встречи"
             await query.edit_message_text(
                 f"📅 Выбери {day_label}:",
-                reply_markup=key
+                reply_markup=append_cancel_row(key),
             )
             return self.STATE_EDIT_DATE
 
@@ -1631,7 +1747,7 @@ class BotApp:
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         context.user_data.clear()
         await update.effective_message.reply_text(
-            "Создаём новую встречу! Как она называется?",
+            "Создаём новую встречу! Как она называется?" + _CONVERSATION_ESCAPE_HINT,
             reply_markup=remove_main_menu_keyboard(),
         )
         return self.STATE_TOPIC
@@ -1727,7 +1843,7 @@ class BotApp:
         day_label = "день открытия регистрации" if picking_reg else "день встречи"
         await query.edit_message_text(
             f"📅 Выбери {day_label}:",
-            reply_markup=calendar
+            reply_markup=append_cancel_row(calendar),
         )
         return self.STATE_DATE
 
@@ -1761,7 +1877,7 @@ class BotApp:
             day_label = "день открытия регистрации" if picking_reg else "день встречи"
             await query.edit_message_text(
                 f"📅 Выбери {day_label}:",
-                reply_markup=key
+                reply_markup=append_cancel_row(key),
             )
             return self.STATE_DATE
 
@@ -1967,10 +2083,10 @@ class BotApp:
         return self.STATE_REG_START_CHOICE
 
     def _reg_start_choice_keyboard(self, prefix: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[
+        return append_cancel_row(InlineKeyboardMarkup([[
             InlineKeyboardButton(text="Сразу", callback_data=f"{prefix}:now"),
             InlineKeyboardButton(text="Выбрать дату", callback_data=f"{prefix}:pick"),
-        ]])
+        ]]))
 
     async def _create_reg_start_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -1999,13 +2115,9 @@ class BotApp:
         return self.STATE_REG_START_CHOICE
 
     async def _create_meeting_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data.clear()
-        user = update.effective_user
-        await update.effective_message.reply_text(
-            "Создание встречи отменено.",
-            reply_markup=self._main_menu_markup(user.id if user else None),
+        return await self._finish_conversation_cancel(
+            update, context, message=_CREATE_CANCEL_MESSAGE
         )
-        return ConversationHandler.END
 
     async def _create_meeting_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle photo upload or skip, then create the meeting."""
@@ -2067,13 +2179,12 @@ class BotApp:
             f"🆔 ID встречи: #{meeting.id}"
             f"{disclaimer}"
         )
-        menu = self._main_menu_markup(user.id)
         if cq:
             await cq.edit_message_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
-            await cq.message.reply_text("Готово 👇", reply_markup=menu)
+            await self._restore_main_menu(cq.message, user.id)
         else:
             await update.message.reply_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
-            await update.message.reply_text("Готово 👇", reply_markup=menu)
+            await self._restore_main_menu(update.message, user.id)
 
         context.user_data.clear()
         return ConversationHandler.END
