@@ -54,6 +54,7 @@ from .keyboards import (
     photo_skip_keyboard,
     edit_photo_keyboard,
     append_cancel_row,
+    conversation_cancel_keyboard,
     CONV_CANCEL_CALLBACK,
 )
 from .main_menu import (
@@ -111,7 +112,9 @@ from .cancellation_confirmation import (
 _CAPTION_LIMIT = 1024
 _CREATE_CANCEL_MESSAGE = "Создание встречи отменено."
 _EDIT_CANCEL_MESSAGE = "Редактирование отменено."
-_CONVERSATION_ESCAPE_HINT = "\n\nВ любой момент можно отменить: /cancel или кнопка «Отмена»."
+_CONVERSATION_ESCAPE_HINT = (
+    "\n\n<i>В любой момент можно отменить: /cancel или кнопка «Отмена».</i>"
+)
 
 
 async def _reply_with_card(
@@ -1746,9 +1749,11 @@ class BotApp:
             return ConversationHandler.END
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         context.user_data.clear()
+        await self._hide_main_menu(update.effective_message)
         await update.effective_message.reply_text(
             "Создаём новую встречу! Как она называется?" + _CONVERSATION_ESCAPE_HINT,
-            reply_markup=remove_main_menu_keyboard(),
+            reply_markup=conversation_cancel_keyboard(),
+            parse_mode="HTML",
         )
         return self.STATE_TOPIC
 
@@ -1770,7 +1775,9 @@ class BotApp:
             return self.STATE_DESCRIPTION
         context.user_data["description"] = message_text_as_html(message)
         await update.effective_message.reply_text(
-            "Принято! Описание получено.\nПожалуйста, укажи максимальное количество участников для этой встречи, не включая ведущих.\nПример: 5"
+            "Принято! Описание получено.\n"
+            "Пожалуйста, укажи максимальное количество участников для этой встречи, не включая ведущих.\n"
+            "Пример: 5"
         )
         return self.STATE_MAX
 
@@ -1787,7 +1794,9 @@ class BotApp:
             return self.STATE_MAX
         context.user_data["max_participants"] = max_p
         await update.effective_message.reply_text(
-            f"Принято! Максимум участников: {max_p}.\nПожалуйста, укажи место проведения встречи (необязательно).\nПример: Cafe Circle Coffee"
+            f"Принято! Максимум участников: {max_p}.\n"
+            "Пожалуйста, укажи место проведения встречи (необязательно).\n"
+            "Пример: Cafe Circle Coffee"
         )
         return self.STATE_LOCATION
 
