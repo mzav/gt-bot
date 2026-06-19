@@ -7,6 +7,7 @@ This module contains reusable UI components for the bot:
 """
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 from dateutil.relativedelta import relativedelta
@@ -37,16 +38,37 @@ CONV_CANCEL_CALLBACK = "conv:cancel"
 CONV_CANCEL_LABEL = "Отмена"
 
 
+def _coerce_inline_markup(markup: InlineKeyboardMarkup | str) -> InlineKeyboardMarkup:
+    if isinstance(markup, InlineKeyboardMarkup):
+        return markup
+    data = json.loads(markup)
+    rows = [
+        [
+            InlineKeyboardButton(text=str(btn["text"]), callback_data=btn["callback_data"])
+            for btn in row
+        ]
+        for row in data["inline_keyboard"]
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 def append_cancel_row(
-    markup: InlineKeyboardMarkup,
+    markup: InlineKeyboardMarkup | str,
     *,
     callback_data: str = CONV_CANCEL_CALLBACK,
     label: str = CONV_CANCEL_LABEL,
 ) -> InlineKeyboardMarkup:
     """Append a cancel button row to an inline keyboard."""
+    markup = _coerce_inline_markup(markup)
     rows = [list(row) for row in markup.inline_keyboard]
     rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
     return InlineKeyboardMarkup(rows)
+
+
+def conversation_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(text=CONV_CANCEL_LABEL, callback_data=CONV_CANCEL_CALLBACK),
+    ]])
 
 
 class MeetingCalendar(DetailedTelegramCalendar):
