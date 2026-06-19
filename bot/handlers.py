@@ -252,16 +252,28 @@ class BotApp:
             ],
             states={
                 self.STATE_TOPIC: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_topic))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._create_meeting_topic),
+                    )
                 ],
                 self.STATE_DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_description))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._create_meeting_description),
+                    )
                 ],
                 self.STATE_MAX: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_max_members))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._create_meeting_max_members),
+                    )
                 ],
                 self.STATE_LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_location))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._create_meeting_location),
+                    )
                 ],
                 self.STATE_MONTH: [
                     CallbackQueryHandler(GC(self._create_meeting_month_callback), pattern=r"^month:")
@@ -289,7 +301,10 @@ class BotApp:
                 self.STATE_PHOTO: [
                     MessageHandler(filters.PHOTO, GC(self._create_meeting_photo)),
                     CallbackQueryHandler(GC(self._create_meeting_photo), pattern=r"^skip_photo$"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._create_meeting_photo_invalid)),
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._create_meeting_photo_invalid),
+                    ),
                 ],
             },
             fallbacks=[
@@ -326,16 +341,28 @@ class BotApp:
                     CallbackQueryHandler(GC(self._edit_done), pattern=r"^edit_field:done$"),
                 ],
                 self.STATE_EDIT_TOPIC: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_topic_handler))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._edit_topic_handler),
+                    )
                 ],
                 self.STATE_EDIT_DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_description_handler))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._edit_description_handler),
+                    )
                 ],
                 self.STATE_EDIT_MAX: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_max_handler))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._edit_max_handler),
+                    )
                 ],
                 self.STATE_EDIT_LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_location_handler))
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._edit_location_handler),
+                    )
                 ],
                 self.STATE_EDIT_MONTH: [
                     CallbackQueryHandler(GC(self._edit_month_callback), pattern=r"^month:")
@@ -363,7 +390,10 @@ class BotApp:
                 self.STATE_EDIT_PHOTO: [
                     MessageHandler(filters.PHOTO, GC(self._edit_photo_handler)),
                     CallbackQueryHandler(GC(self._edit_photo_handler), pattern=r"^edit_photo:"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, GC(self._edit_photo_invalid)),
+                    MessageHandler(
+                        filters.TEXT & ~filters.COMMAND & ~menu_label_filter(),
+                        GC(self._edit_photo_invalid),
+                    ),
                 ],
             },
             fallbacks=[
@@ -436,10 +466,9 @@ class BotApp:
             await sent.delete()
 
     async def _restore_main_menu(self, message, user_id: int | None) -> None:
-        await message.reply_text(
-            "\u200b",
-            reply_markup=self._main_menu_markup(user_id),
-        )
+        sent = await message.reply_text(".", reply_markup=self._main_menu_markup(user_id))
+        with contextlib.suppress(TelegramError):
+            await sent.delete()
 
     async def _finish_conversation_cancel(
         self,
@@ -1112,15 +1141,22 @@ class BotApp:
                     f"{gcal_update_reminder('ru')}"
                 )
                 user = update.effective_user
-                if cq:
-                    await cq.edit_message_text(text, parse_mode="HTML")
-                    await self._restore_main_menu(cq.message, user.id if user else None)
-                else:
-                    await update.effective_message.reply_text(
-                        text,
-                        parse_mode="HTML",
-                        reply_markup=self._main_menu_markup(user.id if user else None),
-                    )
+                try:
+                    if cq:
+                        await cq.edit_message_text(text, parse_mode="HTML")
+                    else:
+                        await update.effective_message.reply_text(
+                            text,
+                            parse_mode="HTML",
+                            reply_markup=self._main_menu_markup(user.id if user else None),
+                        )
+                    if cq:
+                        await self._restore_main_menu(cq.message, user.id if user else None)
+                except TelegramError:
+                    pass
+                finally:
+                    context.user_data.clear()
+                    return ConversationHandler.END
 
         context.user_data.clear()
         return ConversationHandler.END
@@ -2190,12 +2226,15 @@ class BotApp:
         )
         if cq:
             await cq.edit_message_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
-            await self._restore_main_menu(cq.message, user.id)
         else:
             await update.message.reply_text(summary, reply_markup=calendar_keyboard, parse_mode="HTML")
-            await self._restore_main_menu(update.message, user.id)
-
-        context.user_data.clear()
+        try:
+            target = cq.message if cq else update.message
+            await self._restore_main_menu(target, user.id)
+        except TelegramError:
+            pass
+        finally:
+            context.user_data.clear()
         return ConversationHandler.END
 
     async def _create_meeting_photo_invalid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
