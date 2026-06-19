@@ -1749,7 +1749,6 @@ class BotApp:
             return ConversationHandler.END
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         context.user_data.clear()
-        await self._hide_main_menu(update.effective_message)
         await update.effective_message.reply_text(
             "Создаём новую встречу! Как она называется?" + _CONVERSATION_ESCAPE_HINT,
             reply_markup=conversation_cancel_keyboard(),
