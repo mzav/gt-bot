@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from dateutil import tz as dateutil_tz
 from telegram import Bot
 
+from .log_context import log_event, user_log_fields
 from .meeting_notifications import build_meeting_open_keyboard
 from .models import Meeting, Registration
 from .utils import ensure_utc
@@ -90,10 +91,12 @@ async def process_participant_reminders(
 
             keyboard = build_meeting_open_keyboard(meeting, bot_username)
             if keyboard is None:
-                log.warning(
-                    "Sending reminder without open button meeting_id=%s offset_days=%s",
-                    meeting.id,
-                    offset,
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "reminder_missing_keyboard",
+                    meeting_id=meeting.id,
+                    offset_days=offset,
                 )
 
             text = format_reminder_message(meeting, local_tz)
@@ -115,11 +118,14 @@ async def process_participant_reminders(
                         parse_mode="HTML",
                     )
                 except Exception:
-                    log.exception(
-                        "Failed to send reminder user_id=%s meeting_id=%s offset_days=%s",
-                        user.id,
-                        meeting.id,
-                        offset,
+                    log_event(
+                        log,
+                        logging.ERROR,
+                        "reminder_send_failed",
+                        meeting_id=meeting.id,
+                        offset_days=offset,
+                        **user_log_fields(user_id=user.id, username=user.username, name=user.name),
+                        exc_info=True,
                     )
                     continue
 

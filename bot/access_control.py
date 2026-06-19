@@ -5,6 +5,8 @@ import logging
 
 from telegram import Bot
 
+from .log_context import log_event, user_log_fields
+
 from .config import Settings
 
 logger = logging.getLogger(__name__)
@@ -25,10 +27,12 @@ async def is_channel_member(bot: Bot, channel_id: int, user_id: int) -> bool:
         member = await bot.get_chat_member(channel_id, user_id)
         return str(member.status) in ALLOWED_MEMBER_STATUSES
     except Exception as exc:
-        logger.warning(
-            "Channel membership check failed for user_id=%s: %s: %s",
-            user_id,
-            type(exc).__name__,
-            exc,
+        log_event(
+            logger,
+            logging.WARNING,
+            "access_check_failed",
+            channel_id=channel_id,
+            error=type(exc).__name__,
+            **user_log_fields(user_id=user_id),
         )
         return False

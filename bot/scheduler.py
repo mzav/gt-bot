@@ -16,6 +16,7 @@ from dateutil import tz
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .links import build_meeting_deep_link, build_telegram_user_link, meeting_channel_cta_keyboard
+from .log_context import log_event, user_log_fields
 from .storage import Database
 from .meeting_format import format_meeting_time, format_month_year_russian
 from .models import Meeting, User
@@ -255,15 +256,24 @@ class BotScheduler:
         """Build a meeting deep link for channel announcements, if configured."""
         if not self._bot_username or not meeting.public_token:
             if self._channel_id:
-                log.warning(
-                    "Skipping meeting deep-link for meeting %s: bot username or public_token missing",
-                    meeting.id,
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "scheduler_skip_deep_link",
+                    meeting_id=meeting.id,
+                    reason="bot_username_or_token_missing",
                 )
             return None
         try:
             return build_meeting_deep_link(self._bot_username, meeting.public_token)
         except ValueError:
-            log.warning("Skipping meeting deep-link for meeting %s: invalid public_token", meeting.id)
+            log_event(
+                log,
+                logging.WARNING,
+                "scheduler_skip_deep_link",
+                meeting_id=meeting.id,
+                reason="invalid_public_token",
+            )
             return None
 
     def _meeting_cta_keyboard(self, meeting: Meeting) -> InlineKeyboardMarkup | None:
@@ -315,6 +325,13 @@ class BotScheduler:
         to_utc = datetime.combine(today_local, time.max).replace(tzinfo=self._tz).astimezone(tz.UTC)
 
         meetings: Sequence[Meeting] = await self.db.list_meetings_in_range(from_utc, to_utc)
+        log_event(
+            log,
+            logging.INFO,
+            "scheduler_daily_meetings",
+            channel_id=channel_id,
+            meeting_count=len(meetings),
+        )
         for meeting in meetings:
             participants = await self.db.count_confirmed(meeting.id)
             available = await self.db.available_spots(meeting.id)
@@ -359,6 +376,13 @@ class BotScheduler:
         to_utc = datetime.combine(to_date, time.max).replace(tzinfo=self._tz).astimezone(tz.UTC)
 
         meetings: Sequence[Meeting] = await self.db.list_meetings_in_range(from_utc, to_utc)
+        log_event(
+            log,
+            logging.INFO,
+            "scheduler_announcement",
+            channel_id=channel_id,
+            meeting_count=len(meetings),
+        )
 
         month_name = format_month_year_russian(
             datetime.combine(from_date, time.min).replace(tzinfo=self._tz)
@@ -411,6 +435,13 @@ class BotScheduler:
             return
         now_utc = datetime.now(dt_timezone.utc)
         expired, offers = await self._waitlist_service.expire_stale_offers(now_utc)
+        log_event(
+            log,
+            logging.INFO,
+            "scheduler_waitlist_expiration",
+            expired_count=len(expired),
+            new_offer_count=len(offers),
+        )
         await send_expired_notices(self._bot, self._waitlist_service, expired)
         await send_offer_dms(self._bot, self._waitlist_service, offers)
 
@@ -430,6 +461,15 @@ class BotScheduler:
             self._pending_events[meeting.id].append(
                 _ParticipantEvent(user_name=_display_name(user), event=event)
             )
+        log_event(
+            log,
+            logging.INFO,
+            "scheduler_participant_change",
+            meeting_id=meeting.id,
+            event=event,
+            confirmed_count=confirmed_count,
+            **user_log_fields(user_id=user.id, username=user.username, name=user.name),
+        )
 
     async def _send_instant_notification(
         self,
@@ -491,7 +531,13 @@ class BotScheduler:
                 reply_markup=reply_markup,
             )
         except Exception:
-            log.warning("Failed to send DM to host %d", host_id)
+            host = await self.db.get_user(host_id)
+            log_event(
+                log,
+                logging.WARNING,
+                "scheduler_host_dm_failed",
+                **user_log_fields(user_id=host_id, username=host.username if host else None),
+            )
 
     async def maybe_announce_new_meeting(self, meeting: Meeting) -> None:
         """Send an immediate channel announcement if the meeting won't appear in any future digest.

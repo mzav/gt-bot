@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from .log_context import log_event, user_log_fields
 from .google_calendar import gcal_update_reminder
 from .links import build_meeting_deep_link
 from .meeting_format import format_meeting_time
@@ -134,4 +135,11 @@ async def notify_participants(
                 reply_markup=keyboard,
             )
         except Exception:
-            log.exception("Failed to notify participant user_id=%s meeting_id=%s", user.id, meeting.id)
+            log_event(
+                log,
+                logging.ERROR,
+                "participant_notify_failed",
+                meeting_id=meeting.id,
+                **user_log_fields(user_id=user.id, username=user.username, name=user.name),
+                exc_info=True,
+            )

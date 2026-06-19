@@ -11,7 +11,8 @@ from sqlalchemy import select
 if TYPE_CHECKING:
     from telegram import Bot, InlineKeyboardMarkup
 
-from .models import Meeting, WaitlistEntry, WaitlistStatus, Registration, RegistrationStatus
+from .log_context import log_event, user_log_fields
+from .models import Meeting, WaitlistEntry, WaitlistStatus, Registration, RegistrationStatus, User
 from .storage import Database, is_registration_open
 from .utils import ensure_utc
 
@@ -86,7 +87,16 @@ class WaitlistService:
             return WaitlistResult(False, "На встрече есть свободные места — запишитесь напрямую.")
         entry = await self.db.create_waitlist_entry(meeting_id, user_id)
         position = await self.db.get_queue_position(entry.id)
-        log.info("waitlist join meeting_id=%s entry_id=%s position=%s", meeting_id, entry.id, position)
+        user = await self.db.get_user(user_id)
+        log_event(
+            log,
+            logging.INFO,
+            "waitlist_join",
+            meeting_id=meeting_id,
+            entry_id=entry.id,
+            position=position,
+            **user_log_fields(user_id=user_id, username=user.username if user else None),
+        )
         return WaitlistResult(True, "Вы добавлены в waitlist.", entry=entry, position=position)
 
     async def cancel_waitlist(self, meeting_id: int, user_id: int) -> WaitlistResult:
@@ -103,7 +113,15 @@ class WaitlistService:
                 return WaitlistResult(False, "Активная запись в waitlist не найдена.")
             entry.status = WaitlistStatus.CANCELLED
             await s.commit()
-            log.info("waitlist cancel meeting_id=%s entry_id=%s", meeting_id, entry.id)
+            user = await s.get(User, user_id)
+            log_event(
+                log,
+                logging.INFO,
+                "waitlist_cancel",
+                meeting_id=meeting_id,
+                entry_id=entry.id,
+                **user_log_fields(user_id=user_id, username=user.username if user else None),
+            )
             return WaitlistResult(True, "Вы удалены из waitlist.", entry=entry)
 
     async def process_available_spots(self, meeting_id: int, now_utc: datetime) -> list[OfferNotification]:
@@ -143,9 +161,18 @@ class WaitlistService:
             entry.offer_expires_at = expires
             await s.commit()
             await s.refresh(entry)
-            log.info(
-                "waitlist offer meeting_id=%s entry_id=%s expires_at=%s",
-                meeting_id, entry.id, expires.isoformat(),
+            offered_user = await s.get(User, entry.user_id)
+            log_event(
+                log,
+                logging.INFO,
+                "waitlist_offer",
+                meeting_id=meeting_id,
+                entry_id=entry.id,
+                expires_at=expires.isoformat(),
+                **user_log_fields(
+                    user_id=entry.user_id,
+                    username=offered_user.username if offered_user else None,
+                ),
             )
             return OfferNotification(entry=entry, meeting=m, user_id=entry.user_id)
 
@@ -191,7 +218,15 @@ class WaitlistService:
             s.add(reg)
             entry.status = WaitlistStatus.ACCEPTED
             await s.commit()
-            log.info("waitlist accept meeting_id=%s entry_id=%s", entry.meeting_id, entry_id)
+            accepted_user = await s.get(User, user_id)
+            log_event(
+                log,
+                logging.INFO,
+                "waitlist_accept",
+                meeting_id=entry.meeting_id,
+                entry_id=entry_id,
+                **user_log_fields(user_id=user_id, username=accepted_user.username if accepted_user else None),
+            )
             return WaitlistResult(True, "Вы записаны на встречу!", entry=entry)
 
     async def decline_offer(self, entry_id: int, user_id: int, now_utc: datetime) -> WaitlistResult:
@@ -206,7 +241,15 @@ class WaitlistService:
             meeting_id = entry.meeting_id
             entry.status = WaitlistStatus.DECLINED
             await s.commit()
-            log.info("waitlist decline meeting_id=%s entry_id=%s", meeting_id, entry_id)
+            declined_user = await s.get(User, user_id)
+            log_event(
+                log,
+                logging.INFO,
+                "waitlist_decline",
+                meeting_id=meeting_id,
+                entry_id=entry_id,
+                **user_log_fields(user_id=user_id, username=declined_user.username if declined_user else None),
+            )
         notifications = await self.process_available_spots(meeting_id, now_utc)
         msg = "Вы отказались от места."
         if notifications:
@@ -234,7 +277,18 @@ class WaitlistService:
                 await s.commit()
                 if m:
                     expired_notices.append(ExpiredOfferNotice(user_id=locked.user_id, meeting=m))
-                log.info("waitlist expired meeting_id=%s entry_id=%s", meeting_id, entry.id)
+                expired_user = await s.get(User, locked.user_id)
+                log_event(
+                    log,
+                    logging.INFO,
+                    "waitlist_expired",
+                    meeting_id=meeting_id,
+                    entry_id=entry.id,
+                    **user_log_fields(
+                        user_id=locked.user_id,
+                        username=expired_user.username if expired_user else None,
+                    ),
+                )
             notifications = await self.process_available_spots(meeting_id, now_utc)
             all_notifications.extend(notifications)
         return expired_notices, all_notifications
@@ -327,7 +381,15 @@ async def send_offer_dms(
                 reply_markup=keyboard,
             )
         except Exception:
-            log.exception("Failed to send waitlist offer DM entry_id=%s", note.entry.id)
+            log_event(
+                log,
+                logging.ERROR,
+                "waitlist_offer_dm_failed",
+                entry_id=note.entry.id,
+                meeting_id=note.meeting.id,
+                **user_log_fields(user_id=note.user_id),
+                exc_info=True,
+            )
 
 
 async def send_expired_notices(
@@ -340,4 +402,11 @@ async def send_expired_notices(
         try:
             await bot.send_message(chat_id=notice.user_id, text=text, parse_mode="HTML")
         except Exception:
-            log.exception("Failed to send waitlist expiry notice meeting_id=%s", notice.meeting.id)
+            log_event(
+                log,
+                logging.ERROR,
+                "waitlist_expiry_notice_failed",
+                meeting_id=notice.meeting.id,
+                **user_log_fields(user_id=notice.user_id),
+                exc_info=True,
+            )

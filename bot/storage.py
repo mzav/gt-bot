@@ -15,6 +15,7 @@ from sqlalchemy import select, func
 from sqlalchemy.engine import Row
 
 from .links import generate_meeting_public_token
+from .log_context import format_username, log_event
 from .messages import REGISTRATION_SUCCESS
 from .models import (
     Base,
@@ -79,6 +80,14 @@ class Database:
                 u = User(id=user_id, name=name, username=username)
                 s.add(u)
                 await s.commit()
+                log_event(
+                    log,
+                    logging.INFO,
+                    "user_created",
+                    user_id=user_id,
+                    username=format_username(username),
+                    name=name,
+                )
             return u
 
     async def _generate_unique_public_token(self, session: AsyncSession) -> str:
@@ -141,6 +150,15 @@ class Database:
             s.add(reg)
             await s.commit()
             await s.refresh(m)
+            host = await s.get(User, host_id)
+            log_event(
+                log,
+                logging.INFO,
+                "meeting_created",
+                meeting_id=m.id,
+                host_id=host_id,
+                username=format_username(host.username if host else None),
+            )
             return m
 
     async def get_meeting(self, meeting_id: int) -> Meeting | None:
@@ -311,11 +329,28 @@ class Database:
         """
         async with self.session() as s:
             m = await s.get(Meeting, meeting_id)
+            user = await s.get(User, user_id)
+            username = format_username(user.username if user else None)
+
+            def _log_register(*, success: bool, reason: str) -> None:
+                log_event(
+                    log,
+                    logging.INFO,
+                    "register",
+                    meeting_id=meeting_id,
+                    user_id=user_id,
+                    username=username,
+                    success=success,
+                    reason=reason,
+                )
+
             if m is None or m.canceled_at is not None:
+                _log_register(success=False, reason="not_found_or_canceled")
                 return False, "Meeting not found or canceled.", None
             now_utc = datetime.now(timezone.utc)
             start = ensure_utc(m.start_at_utc)
             if start < now_utc:
+                _log_register(success=False, reason="past_meeting")
                 return False, "Meeting not found or canceled.", None
             if not is_registration_open(m, now_utc):
                 tz_obj = local_tz
@@ -323,6 +358,7 @@ class Database:
                     from dateutil import tz as dateutil_tz
                     tz_obj = dateutil_tz.gettz("Europe/Berlin")
                 when = ensure_utc(m.registration_starts_at_utc).astimezone(tz_obj)
+                _log_register(success=False, reason="registration_not_open")
                 return (
                     False,
                     f"Регистрация откроется {when:%d.%m.%Y %H:%M}.",
@@ -336,10 +372,12 @@ class Database:
                 )
             )
             if res.scalar_one_or_none():
+                _log_register(success=False, reason="already_registered")
                 return False, "You are already registered.", None
             confirmed = await self._count_confirmed_in_session(s, meeting_id)
             reserved = await self._count_offered_in_session(s, meeting_id)
             if confirmed + reserved >= m.max_participants:
+                _log_register(success=False, reason="full")
                 return False, "Meeting is full. Join the waitlist if a spot opens.", None
             reg = Registration(
                 meeting_id=meeting_id,
@@ -348,6 +386,7 @@ class Database:
             )
             s.add(reg)
             await s.commit()
+            _log_register(success=True, reason="confirmed")
             return True, REGISTRATION_SUCCESS, RegistrationStatus.CONFIRMED
 
     async def is_registered(self, meeting_id: int, user_id: int) -> bool:
@@ -381,13 +420,35 @@ class Database:
                 )
             )
             reg = res.scalar_one_or_none()
+            user = await s.get(User, user_id)
+            username = format_username(user.username if user else None)
             if not reg:
+                log_event(
+                    log,
+                    logging.INFO,
+                    "unregister",
+                    meeting_id=meeting_id,
+                    user_id=user_id,
+                    username=username,
+                    success=False,
+                    reason="not_registered",
+                )
                 return False, "You are not registered."
             reg.status = RegistrationStatus.CANCELED
             reg.cancelled_at = cancelled_at or datetime.now(timezone.utc)
             reg.cancellation_reason_type = reason_type
             reg.cancellation_reason_text = reason_text if reason_type == "other" else None
             await s.commit()
+            log_event(
+                log,
+                logging.INFO,
+                "unregister",
+                meeting_id=meeting_id,
+                user_id=user_id,
+                username=username,
+                success=True,
+                reason=reason_type or "user_request",
+            )
             return True, "You have been unregistered."
 
     async def get_canceled_registration(
@@ -427,6 +488,15 @@ class Database:
             m.canceled_at = canceled_at
             await s.commit()
             await s.refresh(m)
+            host = await s.get(User, m.created_by)
+            log_event(
+                log,
+                logging.INFO,
+                "meeting_canceled",
+                meeting_id=meeting_id,
+                host_id=m.created_by,
+                username=format_username(host.username if host else None),
+            )
             return m
 
     async def update_meeting(
@@ -453,30 +523,50 @@ class Database:
             m = await s.get(Meeting, meeting_id)
             if m is None:
                 return None
+            changed: list[str] = []
             if topic is not None:
                 m.topic = topic
+                changed.append("topic")
             if description is not None:
                 m.description = description
+                changed.append("description")
             if start_at_utc is not None:
                 m.start_at_utc = start_at_utc
+                changed.append("start_at")
             if end_at_utc is not None:
                 m.end_at_utc = end_at_utc
+                changed.append("end_at")
             if clear_registration_start:
                 m.registration_starts_at_utc = None
+                changed.append("registration_start_cleared")
             elif registration_starts_at_utc is not None:
                 m.registration_starts_at_utc = registration_starts_at_utc
+                changed.append("registration_start")
             if max_participants is not None:
                 m.max_participants = max_participants
+                changed.append("max_participants")
             if clear_location:
                 m.location = None
+                changed.append("location_cleared")
             elif location is not None:
                 m.location = location
+                changed.append("location")
             if clear_photo:
                 m.photo_file_id = None
+                changed.append("photo_cleared")
             elif photo_file_id is not None:
                 m.photo_file_id = photo_file_id
+                changed.append("photo")
             await s.commit()
             await s.refresh(m)
+            if changed:
+                log_event(
+                    log,
+                    logging.INFO,
+                    "meeting_updated",
+                    meeting_id=meeting_id,
+                    fields=",".join(changed),
+                )
             return m
 
     # Waitlist

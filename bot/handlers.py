@@ -33,6 +33,7 @@ from .google_calendar import (
     build_google_calendar_event_url,
 )
 from .links import parse_start_payload
+from .log_context import clear_flow_id, ensure_flow_id, log_event
 from .meeting_actions import resolve_meeting_actions
 from .meeting_format import format_meeting_time, format_registration_start
 from .meeting_notifications import (
@@ -237,7 +238,51 @@ class BotApp:
 
         app.post_init = on_start
         app.post_shutdown = on_stop
+        app.add_error_handler(self._on_error)
         return app
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        exc = context.error
+        tg_update = update if isinstance(update, Update) else None
+        fields: dict[str, object] = {"error": type(exc).__name__}
+        if tg_update and tg_update.callback_query:
+            fields["callback_data"] = tg_update.callback_query.data or ""
+        if tg_update:
+            if tg_update.callback_query:
+                fields["update_type"] = "callback_query"
+            elif tg_update.message:
+                fields["update_type"] = "message"
+            else:
+                fields["update_type"] = "other"
+        log_event(
+            logger,
+            logging.ERROR,
+            "unhandled_error",
+            update=tg_update,
+            context=context,
+            exc_info=True,
+            **fields,
+        )
+
+    def _log_validation_error(
+        self,
+        action: str,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE | None = None,
+        *,
+        exc: Exception | None = None,
+        **fields: object,
+    ) -> None:
+        if exc is not None:
+            fields = {**fields, "error": type(exc).__name__}
+        log_event(
+            logger,
+            logging.WARNING,
+            action,
+            update=update,
+            context=context,
+            **fields,
+        )
 
     def _build_create_meeting_handler(self) -> ConversationHandler:
         """Build the conversation handler for interactive meeting creation."""
@@ -447,14 +492,32 @@ class BotApp:
             return False
         if await self._user_has_community_access(user.id, context):
             return True
+        log_event(
+            logger,
+            logging.INFO,
+            "access_denied",
+            update=update,
+            context=context,
+            reason="not_channel_member",
+        )
         await self._send_restricted_access(update)
         return False
 
     def _community_gated(self, handler, *, conv: bool = False):
+        handler_name = getattr(handler, "__name__", repr(handler))
+
         async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            log_event(
+                logger,
+                logging.DEBUG,
+                handler_name,
+                update=update,
+                context=context,
+            )
             if not await self._ensure_community_access(update, context):
                 return ConversationHandler.END if conv else None
             return await handler(update, context)
+
         return wrapped
 
     def _main_menu_markup(self, user_id: int | None):
@@ -505,16 +568,27 @@ class BotApp:
             return False
         raw_payload = context.args[0] if len(context.args) == 1 else " ".join(context.args)
         payload = parse_start_payload(raw_payload)
-        logger.info(
-            "Start payload user_id=%s raw=%r type=%s",
-            user.id,
-            raw_payload,
-            payload.type,
+        log_event(
+            logger,
+            logging.INFO,
+            "start_payload",
+            update=update,
+            context=context,
+            raw=raw_payload,
+            payload_type=payload.type,
         )
         if payload.type == "meeting" and payload.public_token:
             await self._handle_meeting_deep_link(update, payload.public_token)
             return True
         if raw_payload.startswith("m_"):
+            log_event(
+                logger,
+                logging.INFO,
+                "deep_link_invalid_payload",
+                update=update,
+                context=context,
+                raw=raw_payload,
+            )
             await message.reply_text(
                 "Неверная ссылка на встречу.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
@@ -979,7 +1053,14 @@ class BotApp:
         try:
             meeting = await self.db.get_meeting_by_public_token(public_token)
         except Exception:
-            logger.exception("Failed to load meeting by public token")
+            log_event(
+                logger,
+                logging.ERROR,
+                "deep_link_load_failed",
+                update=update,
+                public_token=public_token,
+                exc_info=True,
+            )
             await message.reply_text(
                 "Не удалось открыть встречу. Попробуй позже или посмотри все предстоящие встречи.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
@@ -987,6 +1068,13 @@ class BotApp:
             return
 
         if not meeting:
+            log_event(
+                logger,
+                logging.INFO,
+                "deep_link_not_found",
+                update=update,
+                public_token=public_token,
+            )
             await message.reply_text(
                 "Встреча не найдена. Возможно, ссылка устарела.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
@@ -994,6 +1082,14 @@ class BotApp:
             return
 
         if meeting.canceled_at is not None:
+            log_event(
+                logger,
+                logging.INFO,
+                "deep_link_canceled",
+                update=update,
+                meeting_id=meeting.id,
+                public_token=public_token,
+            )
             await message.reply_text(
                 "Эта встреча отменена и больше недоступна.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
@@ -1002,6 +1098,14 @@ class BotApp:
 
         now_utc = datetime.now(tz.UTC)
         if ensure_utc(meeting.start_at_utc) < now_utc:
+            log_event(
+                logger,
+                logging.INFO,
+                "deep_link_past",
+                update=update,
+                meeting_id=meeting.id,
+                public_token=public_token,
+            )
             await message.reply_text(
                 "Эта встреча уже прошла.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
@@ -1011,12 +1115,28 @@ class BotApp:
         is_host = meeting.created_by == user.id
         if not is_host and not is_registration_open(meeting, now_utc):
             when = ensure_utc(meeting.registration_starts_at_utc).astimezone(self.local_tz)
+            log_event(
+                logger,
+                logging.INFO,
+                "deep_link_reg_closed",
+                update=update,
+                meeting_id=meeting.id,
+                public_token=public_token,
+            )
             await message.reply_text(
                 f"Регистрация на эту встречу откроется {when:%d.%m.%Y %H:%M}.",
                 reply_markup=self._upcoming_meetings_fallback_keyboard(),
             )
             return
 
+        log_event(
+            logger,
+            logging.INFO,
+            "deep_link_opened",
+            update=update,
+            meeting_id=meeting.id,
+            public_token=public_token,
+        )
         await self._send_upcoming_meeting_entry(message, meeting, user.id, include_register=True)
 
     @staticmethod
@@ -1099,7 +1219,14 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return ConversationHandler.END
 
@@ -1116,6 +1243,15 @@ class BotApp:
             await cq.message.reply_text("Эта встреча уже отменена.")
             return ConversationHandler.END
 
+        ensure_flow_id(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "edit_meeting:start",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
         context.user_data["edit_meeting_id"] = meeting_id
         context.user_data["edit_snapshot"] = snapshot_meeting(meeting)
         await cq.message.reply_text(
@@ -1185,6 +1321,14 @@ class BotApp:
                 except TelegramError:
                     pass
                 finally:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "edit_meeting:done",
+                        update=update,
+                        context=context,
+                        meeting_id=meeting_id,
+                    )
                     context.user_data.clear()
                     return ConversationHandler.END
 
@@ -1465,7 +1609,14 @@ class BotApp:
             max_p = int(text)
             if max_p <= 0:
                 raise ValueError
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:invalid_max",
+                update,
+                context,
+                exc=exc,
+                input=text,
+            )
             await update.effective_message.reply_text(
                 "Не удалось распознать число. Введи положительное число:"
             )
@@ -1626,7 +1777,14 @@ class BotApp:
                 )
                 return self.STATE_EDIT_HOUR
             hour = int(hour_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:invalid_hour",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
             return self.STATE_EDIT_HOUR
 
@@ -1661,7 +1819,14 @@ class BotApp:
             _, hour_str, minute_str = data.split(":")
             hour = int(hour_str)
             minute = int(minute_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:invalid_minute",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
             return self.STATE_EDIT_MINUTE
 
@@ -1731,7 +1896,14 @@ class BotApp:
                 )
                 return self.STATE_EDIT_END_HOUR
             hour = int(hour_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:invalid_end_hour",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
             return self.STATE_EDIT_END_HOUR
 
@@ -1765,7 +1937,14 @@ class BotApp:
             _, hour_str, minute_str = data.split(":")
             hour = int(hour_str)
             minute = int(minute_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "edit_meeting:invalid_end_minute",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
             return self.STATE_EDIT_END_MINUTE
 
@@ -1816,6 +1995,14 @@ class BotApp:
             return ConversationHandler.END
         await self.db.get_or_create_user(user.id, user.full_name, user.username)
         context.user_data.clear()
+        ensure_flow_id(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "create_meeting:start",
+            update=update,
+            context=context,
+        )
         await update.effective_message.reply_text(
             "Создаём новую встречу! Как она называется?" + _CONVERSATION_ESCAPE_HINT,
             reply_markup=conversation_cancel_keyboard(),
@@ -1853,7 +2040,14 @@ class BotApp:
             max_p = int(text)
             if max_p <= 0:
                 raise ValueError
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "create_meeting:invalid_max",
+                update,
+                context,
+                exc=exc,
+                input=text,
+            )
             await update.effective_message.reply_text(
                 "Не удалось распознать число. Пожалуйста, укажи максимальное количество участников. Пример: 20"
             )
@@ -1992,7 +2186,14 @@ class BotApp:
                 )
                 return self.STATE_HOUR
             hour = int(hour_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "create_meeting:invalid_hour",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
             return self.STATE_HOUR
 
@@ -2030,7 +2231,14 @@ class BotApp:
             _, hour_str, minute_str = data.split(":")
             hour = int(hour_str)
             minute = int(minute_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "create_meeting:invalid_minute",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
             return self.STATE_MINUTE
 
@@ -2092,7 +2300,14 @@ class BotApp:
                 )
                 return self.STATE_END_HOUR
             hour = int(hour_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "create_meeting:invalid_end_hour",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе часа. Попробуй ещё раз.")
             return self.STATE_END_HOUR
 
@@ -2124,7 +2339,14 @@ class BotApp:
             _, hour_str, minute_str = data.split(":")
             hour = int(hour_str)
             minute = int(minute_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "create_meeting:invalid_end_minute",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await query.edit_message_text("Ошибка при выборе времени. Попробуй ещё раз.")
             return self.STATE_END_MINUTE
 
@@ -2236,6 +2458,14 @@ class BotApp:
             photo_file_id=photo_file_id,
         )
         await self.scheduler.maybe_announce_new_meeting(meeting)
+        log_event(
+            logger,
+            logging.INFO,
+            "create_meeting:done",
+            update=update,
+            context=context,
+            meeting_id=meeting.id,
+        )
 
         when = format_meeting_time(meeting, self.local_tz, style="short")
         reg_start = format_registration_start(meeting, self.local_tz)
@@ -2286,6 +2516,14 @@ class BotApp:
         if not self.settings.announcements_channel_id:
             await update.effective_message.reply_text("No announcements channel configured.")
             return
+        log_event(
+            logger,
+            logging.INFO,
+            "admin:force_summary",
+            update=update,
+            context=context,
+            channel_id=self.settings.announcements_channel_id,
+        )
         await update.effective_message.reply_text("Sending announcement summary...")
         await self.scheduler.run_announcement_now()
         await update.effective_message.reply_text("Done.")
@@ -2307,7 +2545,7 @@ class BotApp:
         if await self._try_handle_start_deep_link(update, context):
             return
 
-        logger.info("cmd_start user_id=%s without payload", user.id)
+        log_event(logger, logging.INFO, "cmd_start", update=update, context=context)
         await self._send_welcome_message(message, user_id=user.id)
 
     async def handle_main_menu_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2342,6 +2580,15 @@ class BotApp:
         if not message:
             return
         user = update.effective_user
+        preview = (message.text or "")[:50]
+        log_event(
+            logger,
+            logging.DEBUG,
+            "unknown_text",
+            update=update,
+            context=context,
+            text_preview=preview,
+        )
         await message.reply_text(
             f"Не понимаю. Выбери действие в меню или нажми {MENU_HELP}.",
             reply_markup=self._main_menu_markup(user.id if user else None),
@@ -2429,9 +2676,25 @@ class BotApp:
             return
         try:
             meeting_id = int(context.args[0])
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cmd_register:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                raw_arg=context.args[0],
+            )
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
+        ensure_flow_id(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "registration:start",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
         await self._start_registration_flow(update.effective_message, meeting_id, user.id)
 
     async def cmd_unregister(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2445,7 +2708,14 @@ class BotApp:
             return
         try:
             meeting_id = int(context.args[0])
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cmd_unregister:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                raw_arg=context.args[0],
+            )
             await update.effective_message.reply_text("Meeting id must be a number.")
             return
         ok, msg = await self.db.unregister(meeting_id, user.id)
@@ -2475,6 +2745,15 @@ class BotApp:
         if meeting_id is None:
             await cq.message.reply_text("Invalid registration request.")
             return
+        ensure_flow_id(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "registration:start",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
         await self._start_registration_flow(cq.message, meeting_id, user.id)
 
     async def cb_reg_s1_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2565,6 +2844,14 @@ class BotApp:
             keyboard_builder=lambda: build_overlap_confirm_keyboard(meeting_id),
         ):
             return
+        log_event(
+            logger,
+            logging.INFO,
+            "registration:confirm",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
         await self._complete_registration(cq.message, meeting_id, user.id, db_user)
 
     async def cb_reg_overlap_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2626,7 +2913,14 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cb_details:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Invalid details request.")
             return
 
@@ -2693,7 +2987,14 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cb_participants:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
@@ -2725,7 +3026,14 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cb_cancel_meeting:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
@@ -2777,7 +3085,14 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cb_cancel_confirm:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
@@ -2798,6 +3113,15 @@ class BotApp:
         if not canceled_meeting:
             await cq.edit_message_text("Ошибка при отмене встречи.")
             return
+
+        log_event(
+            logger,
+            logging.INFO,
+            "cancel_meeting:confirmed",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
 
         if self.scheduler._bot:
             await notify_participants(
@@ -2831,11 +3155,20 @@ class BotApp:
         try:
             _, meeting_id_str = data.split(":", 1)
             meeting_id = int(meeting_id_str)
-        except Exception:
+        except Exception as exc:
+            self._log_validation_error(
+                "cb_cancel_abort:parse_meeting_id",
+                update,
+                context,
+                exc=exc,
+                callback_data=data,
+            )
             await cq.message.reply_text("Ошибка: неверный запрос.")
             return
 
-        await cq.edit_message_text(f"Отмена встречи #{meeting_id} отклонена. Встреча остаётся активной.")
+        await cq.edit_message_text(
+            f"Отмена встречи #{meeting_id} отклонена. Встреча остаётся активной."
+        )
 
     async def cb_leave_meeting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle 'Отменить участие' button - start cancellation reason flow."""
@@ -2859,6 +3192,15 @@ class BotApp:
             await self._reply_leave_preflight_error(cq.message, result.error)
             return
 
+        ensure_flow_id(context)
+        log_event(
+            logger,
+            logging.INFO,
+            "leave_meeting:start",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+        )
         await cq.message.reply_text(
             format_reason_prompt(result.meeting, self.local_tz),
             reply_markup=build_reason_keyboard(meeting_id),
@@ -2947,6 +3289,15 @@ class BotApp:
                 )
                 return
 
+        log_event(
+            logger,
+            logging.INFO,
+            "leave_meeting:confirmed",
+            update=update,
+            context=context,
+            meeting_id=meeting_id,
+            reason_type=reason_type,
+        )
         await self._complete_leave(
             cq.message,
             meeting_id,

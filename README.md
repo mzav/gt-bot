@@ -60,7 +60,8 @@ bot/
   links.py           — meeting deep-link builders and /start payload parsing
   scheduler.py       — APScheduler jobs (reminders, announcements, host DMs)
   utils.py           — shared formatting helpers
-tests/               — automated tests
+  log_context.py     — structured logging helpers (user/flow correlation)
+  tests/               — automated tests
 ```
 
 ## Quick start
@@ -129,6 +130,24 @@ PYTHONPATH=. pytest --cov=bot --cov=main --cov-report=term-missing
 ```
 
 Coverage configuration lives in `.coveragerc` (`seed_dev.py` and `tests/` are omitted).
+
+## Logging and QA debugging
+
+All logs go to stdout (Railway → Deployments → View Logs). Each line includes `action=...`, `user_id=...`, `username=@...`, and where relevant `update_id=...` or `flow_id=...` for multi-step flows.
+
+**Log level:** set `LOG_LEVEL=INFO` in production during QA. Use `LOG_LEVEL=DEBUG` locally to see every handler entry (`_community_gated` wrapper).
+
+**Search examples in Railway logs:**
+- By user: `user_id=123456789` or `username=@alice`
+- By scenario: `flow_id=abc123def456` (same create/edit/register/leave flow)
+- By failure: `action=unhandled_error` or `level=ERROR`
+
+**Ask testers to report when something breaks:**
+1. Approximate time (Europe/Berlin)
+2. Their `@username` or Telegram user id
+3. What they tapped or typed (e.g. «Записаться» on meeting #5, then confirm)
+
+Logs may contain message previews at DEBUG — treat raw logs as internal only.
 
 ## Expected user commands and flows
 - /start — Welcome and brief help
@@ -234,7 +253,7 @@ litestream restore -config litestream.yml /data/gtbot.db
 ## Development roadmap
 - v0: CRUD for meetings, registration, lists, reminders, edit/cancel ✓
 - v0.1: Meeting deep links from channel announcements ✓
-- v1: Waitlist auto-promotion, HTML escaping, global error handler
+- v1: Waitlist auto-promotion, HTML escaping, global error handler ✓
 - v1.1: iCal export, richer formatting, pagination
 - v2: Web admin dashboard (optional)
 
