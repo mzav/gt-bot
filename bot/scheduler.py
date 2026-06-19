@@ -109,6 +109,11 @@ def _format_organizer_line(host: User) -> str:
     return f'🤍 Организует <a href="{link}">{name}</a>'
 
 
+def _registration_link_line(available: int, deep_link: str) -> str:
+    label = "Регистрация" if available > 0 else "Встать в waitlist"
+    return f'✏️<a href="{deep_link}">{label}</a>'
+
+
 def _format_meeting_card(
     meeting: Meeting,
     available: int,
@@ -129,12 +134,18 @@ def _format_meeting_card(
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
     if deep_link:
-        label = "Регистрация" if available > 0 else "Встать в waitlist"
-        lines.append(f'✏️<a href="{deep_link}">{label}</a>')
+        lines.append(_registration_link_line(available, deep_link))
     return "\n".join(line for line in lines if line)
 
 
-def _format_today_card(meeting: Meeting, participants: int, local_tz) -> str:
+def _format_today_card(
+    meeting: Meeting,
+    participants: int,
+    local_tz,
+    *,
+    available: int = 0,
+    deep_link: str | None = None,
+) -> str:
     """Format a meeting card for the daily 'today' announcement."""
     when = format_meeting_time(meeting, local_tz, style="today")
     lines = [
@@ -145,6 +156,8 @@ def _format_today_card(meeting: Meeting, participants: int, local_tz) -> str:
     ]
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
+    if deep_link:
+        lines.append(_registration_link_line(available, deep_link))
     return "\n".join(line for line in lines if line)
 
 
@@ -153,6 +166,8 @@ def _format_new_meeting_card(
     available: int,
     host: User | None,
     local_tz,
+    *,
+    deep_link: str | None = None,
 ) -> str:
     """Format an immediate announcement for a newly created meeting (HTML)."""
     when = format_meeting_time(meeting, local_tz, style="announce")
@@ -165,6 +180,8 @@ def _format_new_meeting_card(
     parts.append(f"<i>{_format_spots_line(available, emoji='🌼')}</i>")
     if meeting.location:
         parts.append(f"<i>📍 {meeting.location}</i>")
+    if deep_link:
+        parts.append(f"<i>{_registration_link_line(available, deep_link)}</i>")
     return "\n".join(parts)
 
 
@@ -300,11 +317,17 @@ class BotScheduler:
         meetings: Sequence[Meeting] = await self.db.list_meetings_in_range(from_utc, to_utc)
         for meeting in meetings:
             participants = await self.db.count_confirmed(meeting.id)
+            available = await self.db.available_spots(meeting.id)
             await self._send_channel_card(
                 channel_id,
-                _format_today_card(meeting, participants, self._tz),
+                _format_today_card(
+                    meeting,
+                    participants,
+                    self._tz,
+                    available=available,
+                    deep_link=self._meeting_deep_link(meeting),
+                ),
                 meeting.photo_file_id,
-                reply_markup=self._meeting_cta_keyboard(meeting),
             )
 
     def schedule_announcements(self, days: list[int], t: time, channel_id: int | None) -> None:
@@ -485,7 +508,12 @@ class BotScheduler:
         host = await self.db.get_user(meeting.created_by)
         await self._send_channel_card(
             self._channel_id,
-            _format_new_meeting_card(meeting, available, host, self._tz),
+            _format_new_meeting_card(
+                meeting,
+                available,
+                host,
+                self._tz,
+                deep_link=self._meeting_deep_link(meeting),
+            ),
             meeting.photo_file_id,
-            reply_markup=self._meeting_cta_keyboard(meeting),
         )

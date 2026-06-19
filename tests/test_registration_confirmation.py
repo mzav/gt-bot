@@ -216,14 +216,15 @@ async def test_offer_accept_shows_short_confirm(app, db, waitlist, now_utc):
 
 
 @pytest.mark.asyncio
-async def test_offer_confirm_completes_registration(app, db, waitlist, now_utc):
+async def test_offer_confirm_completes_registration(app, db, waitlist):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id, max_participants=2)
     await fill_meeting(db, meeting_id, [11, 12])
     await db.get_or_create_user(10, "Guest", "guest")
-    await waitlist.join_waitlist(meeting_id, 10, now_utc)
+    now = datetime.now(timezone.utc)
+    await waitlist.join_waitlist(meeting_id, 10, now)
     await db.unregister(meeting_id, 11)
-    notifications = await waitlist.process_available_spots(meeting_id, now_utc)
+    notifications = await waitlist.process_available_spots(meeting_id, now)
     entry_id = notifications[0].entry.id
 
     app._send_google_calendar_offer = AsyncMock()
@@ -377,7 +378,7 @@ async def test_offer_confirm_shows_overlap_confirm(app, db, waitlist, now_utc, l
 
 
 @pytest.mark.asyncio
-async def test_offer_overlap_yes_completes_registration(app, db, waitlist, now_utc):
+async def test_offer_overlap_yes_completes_registration(app, db, waitlist):
     host_id = await create_host(db)
     meeting_a_id = await create_meeting(
         db,
@@ -396,10 +397,11 @@ async def test_offer_overlap_yes_completes_registration(app, db, waitlist, now_u
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_a_id, 10)
     await fill_meeting(db, meeting_b_id, [11, 12])
-    join_result = await waitlist.join_waitlist(meeting_b_id, 10, now_utc)
+    now = datetime.now(timezone.utc)
+    join_result = await waitlist.join_waitlist(meeting_b_id, 10, now)
     assert join_result.ok
     await db.unregister(meeting_b_id, 11)
-    notifications = await waitlist.process_available_spots(meeting_b_id, now_utc)
+    notifications = await waitlist.process_available_spots(meeting_b_id, now)
     entry_id = notifications[0].entry.id
     app._send_google_calendar_offer = AsyncMock()
 

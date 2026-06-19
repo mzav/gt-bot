@@ -7,7 +7,12 @@ import pytest
 from dateutil import tz
 
 from bot.models import Meeting, User
-from bot.scheduler import _format_meeting_card, _format_new_meeting_card, _format_spots_line
+from bot.scheduler import (
+    _format_meeting_card,
+    _format_new_meeting_card,
+    _format_spots_line,
+    _format_today_card,
+)
 
 
 @pytest.fixture
@@ -105,6 +110,30 @@ def test_format_new_meeting_card(berlin_tz):
     assert "<i>🌼 10 мест</i>" in card
     assert "<i>📍 Cafe Cafe Cafe</i>" in card
     assert "New meeting added" not in card
+
+
+def test_format_new_meeting_card_includes_registration_link(berlin_tz):
+    meeting = _make_meeting()
+    host = _make_host()
+    card = _format_new_meeting_card(
+        meeting, 10, host, berlin_tz, deep_link="https://t.me/bot?start=m_abc"
+    )
+    assert '<i>✏️<a href="https://t.me/bot?start=m_abc">Регистрация</a></i>' in card
+
+
+def test_format_today_card_includes_registration_link(berlin_tz):
+    meeting = _make_meeting(description="Bring snacks")
+    card = _format_today_card(
+        meeting,
+        3,
+        berlin_tz,
+        available=2,
+        deep_link="https://t.me/bot?start=m_abc",
+    )
+    assert "🔔 <b>Meeting today —" in card
+    assert "Bring snacks" in card
+    assert "👥 3 participants" in card
+    assert '✏️<a href="https://t.me/bot?start=m_abc">Регистрация</a>' in card
 
 
 def test_format_new_meeting_card_with_html_description_and_location(berlin_tz):
