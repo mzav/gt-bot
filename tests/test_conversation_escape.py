@@ -23,6 +23,7 @@ def _make_cancel_callback_update(*, user_id: int = 10):
     cq.data = CONV_CANCEL_CALLBACK
     cq.message = message
     cq.answer = AsyncMock()
+    cq.edit_message_reply_markup = AsyncMock()
     cq.edit_message_text = AsyncMock()
     update = MagicMock()
     update.callback_query = cq
@@ -95,8 +96,11 @@ async def test_create_cancel_callback_clears_state(app, db):
 
     assert result == ConversationHandler.END
     assert context.user_data == {}
-    update.callback_query.edit_message_text.assert_awaited_with(_CREATE_CANCEL_MESSAGE)
-    update.callback_query.message.reply_text.assert_awaited()
+    update.callback_query.edit_message_reply_markup.assert_awaited_with(reply_markup=None)
+    update.callback_query.message.reply_text.assert_awaited_with(
+        _CREATE_CANCEL_MESSAGE,
+        reply_markup=app._main_menu_markup(10),
+    )
 
 
 @pytest.mark.asyncio
@@ -112,8 +116,11 @@ async def test_edit_cancel_callback_clears_state(app, db):
 
     assert result == ConversationHandler.END
     assert context.user_data == {}
-    update.callback_query.edit_message_text.assert_awaited_with(_EDIT_CANCEL_MESSAGE)
-    update.callback_query.message.reply_text.assert_awaited()
+    update.callback_query.edit_message_reply_markup.assert_awaited_with(reply_markup=None)
+    update.callback_query.message.reply_text.assert_awaited_with(
+        _EDIT_CANCEL_MESSAGE,
+        reply_markup=app._main_menu_markup(host_id),
+    )
 
 
 @pytest.mark.asyncio

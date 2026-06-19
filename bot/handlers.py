@@ -436,9 +436,10 @@ class BotApp:
             await sent.delete()
 
     async def _restore_main_menu(self, message, user_id: int | None) -> None:
-        sent = await message.reply_text(".", reply_markup=self._main_menu_markup(user_id))
-        with contextlib.suppress(TelegramError):
-            await sent.delete()
+        await message.reply_text(
+            "\u200b",
+            reply_markup=self._main_menu_markup(user_id),
+        )
 
     async def _finish_conversation_cancel(
         self,
@@ -453,10 +454,10 @@ class BotApp:
         cq = update.callback_query
         if cq:
             await cq.answer()
-            with contextlib.suppress(TelegramError):
-                await cq.edit_message_text(message)
             if cq.message:
-                await self._restore_main_menu(cq.message, user.id if user else None)
+                with contextlib.suppress(TelegramError):
+                    await cq.edit_message_reply_markup(reply_markup=None)
+                await cq.message.reply_text(message, reply_markup=menu)
         else:
             effective = update.effective_message
             if effective:
