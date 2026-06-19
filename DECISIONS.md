@@ -117,8 +117,12 @@ Expose meetings in channel announcements via Telegram deep links using opaque `p
 ### Implementation notes
 - `bot/links.py` — token generation, link builder, payload parser
 - `BOT_USERNAME` env var; falls back to `bot.get_me().username` at startup
-- Digest keeps one packed message with an HTML deep link per meeting; single-meeting posts use inline URL buttons
+- Channel posts use HTML deep links in message text (not inline keyboard URL buttons), because `reply_markup` on a channel post hides “Leave a comment” when a discussion group is linked
+- Digest keeps one packed message with an HTML deep link per meeting
 - Invalid, missing, canceled, or past meetings show a fallback message with a button to list upcoming meetings
+
+### Known client limitation
+Telegram Desktop may show a START button on the first click of a deep link and only send `/start m_<token>` on a second click (or after pressing START). This is Telegram client behavior; the bot handles the payload correctly once it arrives.
 
 ### Alternatives considered
 | Option | Why rejected |

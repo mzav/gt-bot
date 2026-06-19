@@ -14,7 +14,7 @@ from bot.keyboards import CONV_CANCEL_CALLBACK
 from bot.main_menu import MENU_MEETINGS
 from bot.messages import WELCOME_MESSAGE
 from tests.conftest import TEST_CHANNEL_ID, create_host, create_meeting, make_context
-from tests.test_access_control import _make_app, _make_text_update
+from tests.test_access_control import _make_app, _make_start_update, _make_text_update
 
 
 def _make_cancel_callback_update(*, user_id: int = 10):
@@ -87,6 +87,25 @@ async def test_create_start_fallback_shows_welcome_and_clears_state(app, db):
 
 
 @pytest.mark.asyncio
+async def test_create_start_fallback_handles_meeting_deep_link(app, db):
+    host_id = await create_host(db, user_id=10)
+    meeting_id = await create_meeting(db, host_id, topic="Book Club")
+    meeting = await db.get_meeting(meeting_id)
+    context = make_context(status="member")
+    context.user_data["topic"] = "Draft meeting"
+
+    update, context = _make_start_update(f"m_{meeting.public_token}", user_id=10)
+    gated = app._community_gated(app._create_meeting_start_fallback, conv=True)
+    result = await gated(update, context)
+
+    assert result == ConversationHandler.END
+    assert context.user_data == {}
+    text = update.effective_message.reply_text.await_args.args[0]
+    assert "Book Club" in text
+    assert text != WELCOME_MESSAGE
+
+
+@pytest.mark.asyncio
 async def test_create_cancel_callback_clears_state(app, db):
     await create_host(db, user_id=10)
     context = make_context(status="member")
@@ -156,6 +175,26 @@ async def test_edit_start_fallback_shows_welcome_and_clears_state(app, db):
     assert context.user_data == {}
     text = update.effective_message.reply_text.await_args.args[0]
     assert text == WELCOME_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_edit_start_fallback_handles_meeting_deep_link(app, db):
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id, topic="Deep Link Meeting")
+    meeting = await db.get_meeting(meeting_id)
+    other_meeting_id = await create_meeting(db, host_id, topic="Other Meeting")
+    context = make_context(status="member")
+    context.user_data["edit_meeting_id"] = other_meeting_id
+
+    update, context = _make_start_update(f"m_{meeting.public_token}", user_id=host_id)
+    gated = app._community_gated(app._edit_start_fallback, conv=True)
+    result = await gated(update, context)
+
+    assert result == ConversationHandler.END
+    assert context.user_data == {}
+    text = update.effective_message.reply_text.await_args.args[0]
+    assert "Deep Link Meeting" in text
+    assert text != WELCOME_MESSAGE
 
 
 @pytest.mark.asyncio

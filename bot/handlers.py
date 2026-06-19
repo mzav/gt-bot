@@ -493,7 +493,36 @@ class BotApp:
                 await effective.reply_text(message, reply_markup=menu)
         return ConversationHandler.END
 
-    async def _create_meeting_start_fallback(
+    async def _try_handle_start_deep_link(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        """Handle /start payload if present. Returns True when the update is fully handled."""
+        if not context.args:
+            return False
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not user:
+            return False
+        raw_payload = context.args[0] if len(context.args) == 1 else " ".join(context.args)
+        payload = parse_start_payload(raw_payload)
+        logger.info(
+            "Start payload user_id=%s raw=%r type=%s",
+            user.id,
+            raw_payload,
+            payload.type,
+        )
+        if payload.type == "meeting" and payload.public_token:
+            await self._handle_meeting_deep_link(update, payload.public_token)
+            return True
+        if raw_payload.startswith("m_"):
+            await message.reply_text(
+                "Неверная ссылка на встречу.",
+                reply_markup=self._upcoming_meetings_fallback_keyboard(),
+            )
+            return True
+        return False
+
+    async def _conversation_start_fallback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
         context.user_data.clear()
@@ -501,8 +530,15 @@ class BotApp:
         message = update.effective_message
         if user and message:
             await self.db.get_or_create_user(user.id, user.full_name, user.username)
+            if await self._try_handle_start_deep_link(update, context):
+                return ConversationHandler.END
             await self._send_welcome_message(message, user_id=user.id)
         return ConversationHandler.END
+
+    async def _create_meeting_start_fallback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        return await self._conversation_start_fallback(update, context)
 
     async def _create_meeting_menu_fallback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -533,13 +569,7 @@ class BotApp:
     async def _edit_start_fallback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
-        context.user_data.clear()
-        user = update.effective_user
-        message = update.effective_message
-        if user and message:
-            await self.db.get_or_create_user(user.id, user.full_name, user.username)
-            await self._send_welcome_message(message, user_id=user.id)
-        return ConversationHandler.END
+        return await self._conversation_start_fallback(update, context)
 
     async def _edit_menu_fallback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2274,19 +2304,10 @@ class BotApp:
             await self._send_restricted_access(update)
             return
 
-        if context.args:
-            raw_payload = context.args[0] if len(context.args) == 1 else " ".join(context.args)
-            payload = parse_start_payload(raw_payload)
-            if payload.type == "meeting" and payload.public_token:
-                await self._handle_meeting_deep_link(update, payload.public_token)
-                return
-            if raw_payload.startswith("m_"):
-                await message.reply_text(
-                    "Неверная ссылка на встречу.",
-                    reply_markup=self._upcoming_meetings_fallback_keyboard(),
-                )
-                return
+        if await self._try_handle_start_deep_link(update, context):
+            return
 
+        logger.info("cmd_start user_id=%s without payload", user.id)
         await self._send_welcome_message(message, user_id=user.id)
 
     async def handle_main_menu_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

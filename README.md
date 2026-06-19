@@ -149,9 +149,13 @@ https://t.me/<BOT_USERNAME>?start=m_<public_token>
 ```
 
 **Channel announcements** include a CTA built from this link:
-- Twice-monthly digest — one packed message listing all meetings, each with an inline HTML link
-- Spontaneous new-meeting posts — inline URL button (when not covered by a future digest)
-- Same-day “meeting today” posts — inline URL button
+- Twice-monthly digest — one packed message listing all meetings, each with an HTML deep link in the text
+- Spontaneous new-meeting posts — HTML deep link in the post text (not an inline keyboard button)
+- Same-day “meeting today” posts — HTML deep link in the post text
+
+Channel posts use HTML links rather than inline URL buttons under the post, because `reply_markup` on a channel post replaces the “Leave a comment” button when the channel has a linked discussion group.
+
+**Telegram Desktop quirk:** opening `t.me/<bot>?start=m_<token>` may show a START button and not send `/start` to the bot until the link is clicked again (or START is pressed). This is client-side behavior, not a bot bug. Mobile clients usually handle deep links more smoothly for users who have already started the bot.
 
 **Bot behavior when a user opens the link:**
 1. `/start` receives payload `m_<public_token>`
