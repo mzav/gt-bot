@@ -7,6 +7,8 @@ from typing import Optional
 from sqlalchemy import ForeignKey, String, Text, Integer, BigInteger, DateTime, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from .utils import utc_now
+
 
 class Base(DeclarativeBase):
     """Base declarative class for SQLAlchemy models."""
@@ -20,7 +22,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # Telegram user id
     name: Mapped[str] = mapped_column(String(255))
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     registrations: Mapped[list[Registration]] = relationship("Registration", back_populates="user", cascade="all, delete-orphan")
     waitlist_entries: Mapped[list["WaitlistEntry"]] = relationship("WaitlistEntry", back_populates="user", cascade="all, delete-orphan")
@@ -41,8 +43,8 @@ class Meeting(Base):
     location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     canceled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     public_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
@@ -79,7 +81,7 @@ class Registration(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     status: Mapped[str] = mapped_column(String(20), default=RegistrationStatus.CONFIRMED, index=True)
     is_host: Mapped[bool] = mapped_column(default=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     cancellation_reason_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     cancellation_reason_text: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -99,7 +101,7 @@ class WaitlistEntry(Base):
     meeting_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     status: Mapped[str] = mapped_column(String(20), default=WaitlistStatus.WAITING, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     offered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     offer_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -225,3 +225,49 @@ def test_keyboard_states():
         is_host=False, is_participant=False, available=0,
         waitlist_state="offered", include_register=True,
     ) == "waitlist_offered"
+
+
+@pytest.mark.asyncio
+async def test_build_offer_keyboard():
+    from bot.waitlist import build_offer_keyboard
+
+    markup = build_offer_keyboard(entry_id=5, meeting_id=10)
+    callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert "offer_accept:5" in callbacks
+    assert "offer_decline:5" in callbacks
+    assert "details:10" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_send_offer_dms(db, waitlist, now_utc):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.waitlist import OfferNotification, send_offer_dms
+
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id, max_participants=1)
+    await fill_meeting(db, meeting_id, [2])
+    await db.get_or_create_user(10, "Guest", "guest")
+    await waitlist.join_waitlist(meeting_id, 10, now_utc)
+    await db.unregister(meeting_id, 2)
+    offers = await waitlist.process_available_spots(meeting_id, now_utc)
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    await send_offer_dms(bot, waitlist, offers)
+    bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_expired_notices(db, waitlist, now_utc):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.waitlist import ExpiredOfferNotice, send_expired_notices
+
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    meeting = await db.get_meeting(meeting_id)
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    notices = [ExpiredOfferNotice(user_id=10, meeting=meeting)]
+    await send_expired_notices(bot, waitlist, notices)
+    bot.send_message.assert_awaited_once()

@@ -119,6 +119,17 @@ Edit `MY_TELEGRAM_ID` and `MY_USERNAME` in `seed_dev.py` first so host-only butt
 python main.py
 ```
 
+## Running tests
+
+From the project root with the virtual environment activated:
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=. pytest --cov=bot --cov=main --cov-report=term-missing
+```
+
+Coverage configuration lives in `.coveragerc` (`seed_dev.py` and `tests/` are omitted).
+
 ## Expected user commands and flows
 - /start — Welcome and brief help
 - /start m_<public_token> — Open a specific meeting (from a channel deep link); shows the same card and action buttons as `/upcoming_meetings` (register, leave, details, host actions)

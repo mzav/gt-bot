@@ -19,7 +19,7 @@ from .links import build_meeting_deep_link, build_telegram_user_link, meeting_ch
 from .storage import Database
 from .meeting_format import format_meeting_time, format_month_year_russian
 from .models import Meeting, User
-from .utils import ensure_utc
+from .utils import ensure_utc, utc_now
 
 if TYPE_CHECKING:
     from .waitlist import WaitlistService
@@ -205,7 +205,7 @@ def _split_messages(header: str, cards: list[str], max_len: int = _TG_MAX_MESSAG
 class _ParticipantEvent:
     user_name: str
     event: Literal["joined", "left"]
-    at: datetime = field(default_factory=datetime.utcnow)
+    at: datetime = field(default_factory=utc_now)
 
 
 def _display_name(user: User) -> str:

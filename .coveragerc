@@ -1,0 +1,9 @@
+[run]
+source = bot, main
+omit =
+    seed_dev.py
+    tests/*
+
+[report]
+show_missing = True
+skip_empty = True

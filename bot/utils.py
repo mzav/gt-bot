@@ -12,6 +12,11 @@ _A_TAG_RE = re.compile(r'<a href="([^"]+)">([^<]*)</a>')
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
+def utc_now() -> datetime:
+    """Return current UTC time as timezone-aware datetime."""
+    return datetime.now(tz.UTC)
+
+
 def ensure_utc(dt: datetime) -> datetime:
     """Ensure datetime has UTC timezone attached.
     

@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from dateutil import tz
+from telegram import User as TgUser
 
+from bot.config import Settings
+from bot.handlers import BotApp
 from bot.models import WaitlistStatus
 from bot.storage import Database
 from bot.waitlist import WaitlistService
@@ -18,6 +21,7 @@ def make_context(*, status: str = "member", raise_error: Exception | None = None
     """Build a mock PTB context with get_chat_member configured."""
     context = MagicMock()
     context.user_data = {}
+    context.args = []
     if raise_error is not None:
         context.bot.get_chat_member = AsyncMock(side_effect=raise_error)
     else:
@@ -25,6 +29,81 @@ def make_context(*, status: str = "member", raise_error: Exception | None = None
         member.status = status
         context.bot.get_chat_member = AsyncMock(return_value=member)
     return context
+
+
+def make_callback_update(callback_data: str, *, user_id: int = 10):
+    user = TgUser(
+        id=user_id,
+        is_bot=False,
+        first_name="Test",
+        username="testuser",
+    )
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+    message.edit_text = AsyncMock()
+    message.edit_message_text = AsyncMock()
+    cq = MagicMock()
+    cq.data = callback_data
+    cq.message = message
+    cq.answer = AsyncMock()
+    cq.edit_message_text = AsyncMock()
+    cq.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = cq
+    update.effective_user = user
+    return update
+
+
+def make_message_update(text: str, *, user_id: int = 10):
+    user = TgUser(
+        id=user_id,
+        is_bot=False,
+        first_name="Test",
+        last_name="User",
+        username="testuser",
+    )
+    message = MagicMock()
+    message.text = text
+    message.text_html = None
+    message.reply_text = AsyncMock()
+    message.edit_text = AsyncMock()
+    update = MagicMock()
+    update.effective_message = message
+    update.effective_user = user
+    update.message = message
+    return update
+
+
+def make_command_update(*args: str, user_id: int = 10):
+    context = make_context()
+    context.args = list(args)
+    update = make_message_update("", user_id=user_id)
+    return update, context
+
+
+def make_app(
+    db,
+    waitlist,
+    *,
+    admin_user_ids: list[int] | None = None,
+    channel_id: int | None = TEST_CHANNEL_ID,
+    scheduler=None,
+) -> BotApp:
+    settings = Settings(
+        telegram_bot_token="test-token",
+        tz="Europe/Berlin",
+        announcements_channel_id=channel_id,
+        admin_user_ids=admin_user_ids or [],
+    )
+    if scheduler is None:
+        scheduler = MagicMock()
+        scheduler.on_participant_change = AsyncMock()
+        scheduler.maybe_announce_new_meeting = AsyncMock()
+        scheduler.run_announcement_now = AsyncMock()
+        scheduler._bot = MagicMock()
+    app = BotApp(settings, db, scheduler, waitlist)
+    app.bot_username = "TestBot"
+    return app
 
 
 @pytest.fixture

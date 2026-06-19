@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from telegram import Chat, Message, MessageEntity, User as TgUser
 from telegram.constants import MessageEntityType
 
-from bot.utils import message_text_as_html, telegram_html_to_plain
+from bot.utils import ensure_utc, message_text_as_html, telegram_html_to_plain
 
 
 def _make_message(*, text: str, entities: list[MessageEntity] | None = None) -> Message:
@@ -55,3 +55,15 @@ def test_telegram_html_to_plain_bold_and_link():
 
 def test_telegram_html_to_plain_unchanged_plain_text():
     assert telegram_html_to_plain("Berlin Cafe") == "Berlin Cafe"
+
+
+def test_ensure_utc_naive():
+    naive = datetime(2026, 7, 1, 12, 0, 0)
+    result = ensure_utc(naive)
+    assert result.tzinfo is not None
+    assert result.hour == 12
+
+
+def test_ensure_utc_already_aware():
+    aware = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
+    assert ensure_utc(aware) is aware

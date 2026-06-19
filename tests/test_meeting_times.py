@@ -7,7 +7,7 @@ import pytest
 from dateutil import tz
 
 from bot.google_calendar import effective_end_at_utc, DEFAULT_MEETING_DURATION
-from bot.meeting_format import format_meeting_time, format_month_year_russian
+from bot.meeting_format import format_meeting_time, format_month_year_russian, format_registration_start
 from bot.models import Meeting
 
 
@@ -83,3 +83,15 @@ def test_effective_end_at_utc_fallback():
     end = effective_end_at_utc(meeting)
     expected = meeting.start_at_utc + DEFAULT_MEETING_DURATION
     assert end == expected
+
+
+def test_format_registration_start_immediate(berlin_tz):
+    meeting = _make_meeting(registration_starts_at_utc=None)
+    assert format_registration_start(meeting, berlin_tz) == "Сразу"
+
+
+def test_format_registration_start_scheduled(berlin_tz):
+    meeting = _make_meeting(
+        registration_starts_at_utc=datetime(2026, 6, 15, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    assert format_registration_start(meeting, berlin_tz) == "15.06.2026 12:00"
