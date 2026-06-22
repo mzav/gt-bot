@@ -9,6 +9,7 @@ from telegram.ext import ConversationHandler
 
 from bot.handlers import BotApp
 from bot.keyboards import CONV_CANCEL_CALLBACK
+from bot.messages import FLOW_DONE_MESSAGE
 from tests.conftest import create_host, create_meeting, make_app, make_callback_update, make_context, make_message_update
 
 
@@ -112,3 +113,39 @@ async def test_edit_cancel_clears_state(app, db):
     result = await app._edit_cancel_callback(update, context)
     assert result == ConversationHandler.END
     assert context.user_data == {}
+
+
+@pytest.mark.asyncio
+async def test_restore_main_menu_sends_gotovo_with_menu(app):
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+    await app._restore_main_menu(message, user_id=5)
+    message.reply_text.assert_awaited_once_with(
+        FLOW_DONE_MESSAGE,
+        reply_markup=app._main_menu_markup(5),
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_done_restores_menu_after_confirmation(app, db):
+    app, meeting_id, host_id, context = await _start_edit(app, db)
+    update = make_callback_update("edit_field:done", user_id=host_id)
+    result = await app._edit_done(update, context)
+    assert result == ConversationHandler.END
+    assert context.user_data == {}
+    update.callback_query.edit_message_text.assert_awaited_once()
+    update.callback_query.message.reply_text.assert_awaited_once_with(
+        FLOW_DONE_MESSAGE,
+        reply_markup=app._main_menu_markup(host_id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_topic_handler_does_not_restore_menu(app, db):
+    app, meeting_id, host_id, context = await _start_edit(app, db)
+    update = make_callback_update("edit_field:topic", user_id=host_id)
+    await app._edit_select_topic(update, context)
+    update = make_message_update("New Topic", user_id=host_id)
+    await app._edit_topic_handler(update, context)
+    for call in update.effective_message.reply_text.await_args_list:
+        assert call.args[0] != FLOW_DONE_MESSAGE

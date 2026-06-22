@@ -45,12 +45,12 @@ def _make_host(**overrides) -> User:
     ("available", "expected"),
     [
         (0, "🌻 Мест нет"),
-        (1, "🌻 1 место"),
-        (2, "🌻 2 места"),
-        (4, "🌻 4 места"),
-        (5, "🌻 5 мест"),
-        (11, "🌻 11 мест"),
-        (21, "🌻 21 место"),
+        (1, "🌻 Осталось 1 место"),
+        (2, "🌻 Осталось 2 места"),
+        (4, "🌻 Осталось 4 места"),
+        (5, "🌻 Осталось 5 мест"),
+        (11, "🌻 Осталось 11 мест"),
+        (21, "🌻 Осталось 21 место"),
     ],
 )
 def test_format_spots_line(available, expected):
@@ -66,7 +66,7 @@ def test_format_meeting_card_with_spots(berlin_tz):
     assert "<b>19.08 (среда) 19:00 - 22:00</b>" in card
     assert "Дойти и не сломаться" in card
     assert 'Ведет <a href="https://t.me/tanya">Таня Зайнуллина</a>.' in card
-    assert "🌻 2 места" in card
+    assert "🌻 Осталось 2 места" in card
     assert '✏️<a href="https://t.me/bot?start=m_abc">Регистрация</a>' in card
 
 
@@ -107,7 +107,7 @@ def test_format_new_meeting_card(berlin_tz):
     assert "<b>Проверим отправку анонса</b>" in card
     assert "проверяем описание" in card
     assert '<i>🤍 Организует <a href="https://t.me/tanya">Таня Зайнуллина</a></i>' in card
-    assert "<i>🌼 10 мест</i>" in card
+    assert "<i>🌼 Осталось 10 мест</i>" in card
     assert "<i>📍 Cafe Cafe Cafe</i>" in card
     assert "New meeting added" not in card
 
@@ -123,17 +123,35 @@ def test_format_new_meeting_card_includes_registration_link(berlin_tz):
 
 def test_format_today_card_includes_registration_link(berlin_tz):
     meeting = _make_meeting(description="Bring snacks")
+    host = _make_host()
     card = _format_today_card(
         meeting,
-        3,
+        2,
+        host,
         berlin_tz,
-        available=2,
         deep_link="https://t.me/bot?start=m_abc",
     )
-    assert "🔔 <b>Meeting today —" in card
+    assert "🔔 <b>Встреча сегодня —" in card
     assert "Bring snacks" in card
-    assert "👥 3 participants" in card
+    assert '<i>🤍 Организует <a href="https://t.me/tanya">Таня Зайнуллина</a></i>' in card
+    assert "<i>🌼 Осталось 2 места</i>" in card
+    assert "participants" not in card
     assert '✏️<a href="https://t.me/bot?start=m_abc">Регистрация</a>' in card
+
+
+def test_format_today_card_shows_available_spots_not_participant_count(berlin_tz):
+    meeting = _make_meeting(max_participants=10)
+    host = _make_host()
+    card = _format_today_card(meeting, 10, host, berlin_tz)
+    assert "<i>🌼 Осталось 10 мест</i>" in card
+    assert "👥" not in card
+
+
+def test_format_today_card_full_meeting_shows_no_spots(berlin_tz):
+    meeting = _make_meeting()
+    host = _make_host()
+    card = _format_today_card(meeting, 0, host, berlin_tz)
+    assert "<i>🌼 Мест нет</i>" in card
 
 
 def test_format_new_meeting_card_with_html_description_and_location(berlin_tz):

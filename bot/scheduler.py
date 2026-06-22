@@ -77,7 +77,7 @@ def _covered_by_future_announcement(meeting_date: date, today: date, announce_da
 
 
 def _format_spots_line(available: int, *, emoji: str = "🌻") -> str:
-    """Format the availability line for a digest card."""
+    """Format the free-spots line for a digest card."""
     if available <= 0:
         return f"{emoji} Мест нет"
     n = available
@@ -87,7 +87,7 @@ def _format_spots_line(available: int, *, emoji: str = "🌻") -> str:
         word = "места"
     else:
         word = "мест"
-    return f"{emoji} {n} {word}"
+    return f"{emoji} Осталось {n} {word}"
 
 
 def _host_display_name(user: User) -> str:
@@ -141,20 +141,23 @@ def _format_meeting_card(
 
 def _format_today_card(
     meeting: Meeting,
-    participants: int,
+    available: int,
+    host: User | None,
     local_tz,
     *,
-    available: int = 0,
     deep_link: str | None = None,
 ) -> str:
     """Format a meeting card for the daily 'today' announcement."""
     when = format_meeting_time(meeting, local_tz, style="today")
     lines = [
-        f"🔔 <b>Meeting today — {when}</b>",
+        f"🔔 <b>Встреча сегодня — {when}</b>",
         f"<b>{meeting.topic}</b>",
-        meeting.description or "",
-        f"👥 {participants} participant{'s' if participants != 1 else ''}",
     ]
+    if meeting.description:
+        lines.append(meeting.description)
+    if host:
+        lines.append(f"<i>{_format_organizer_line(host)}</i>")
+    lines.append(f"<i>{_format_spots_line(available, emoji='🌼')}</i>")
     if meeting.location:
         lines.append(f"📍 {meeting.location}")
     if deep_link:
@@ -333,15 +336,15 @@ class BotScheduler:
             meeting_count=len(meetings),
         )
         for meeting in meetings:
-            participants = await self.db.count_confirmed(meeting.id)
             available = await self.db.available_spots(meeting.id)
+            host = await self.db.get_user(meeting.created_by)
             await self._send_channel_card(
                 channel_id,
                 _format_today_card(
                     meeting,
-                    participants,
+                    available,
+                    host,
                     self._tz,
-                    available=available,
                     deep_link=self._meeting_deep_link(meeting),
                 ),
                 meeting.photo_file_id,

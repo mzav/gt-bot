@@ -41,7 +41,7 @@ from .meeting_notifications import (
     notify_participants,
     snapshot_meeting,
 )
-from .messages import RESTRICTED_ACCESS_MESSAGE, WELCOME_MESSAGE
+from .messages import FLOW_DONE_MESSAGE, RESTRICTED_ACCESS_MESSAGE, WELCOME_MESSAGE
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
 from .storage import Database, is_registration_open
 from .scheduler import BotScheduler
@@ -529,9 +529,10 @@ class BotApp:
             await sent.delete()
 
     async def _restore_main_menu(self, message, user_id: int | None) -> None:
-        sent = await message.reply_text(".", reply_markup=self._main_menu_markup(user_id))
-        with contextlib.suppress(TelegramError):
-            await sent.delete()
+        await message.reply_text(
+            FLOW_DONE_MESSAGE,
+            reply_markup=self._main_menu_markup(user_id),
+        )
 
     async def _finish_conversation_cancel(
         self,
@@ -1307,17 +1308,19 @@ class BotApp:
                     f"{gcal_update_reminder('ru')}"
                 )
                 user = update.effective_user
+                user_id = user.id if user else None
                 try:
+                    menu_target = None
                     if cq:
                         await cq.edit_message_text(text, parse_mode="HTML")
+                        menu_target = cq.message
                     else:
-                        await update.effective_message.reply_text(
-                            text,
-                            parse_mode="HTML",
-                            reply_markup=self._main_menu_markup(user.id if user else None),
-                        )
-                    if cq:
-                        await self._restore_main_menu(cq.message, user.id if user else None)
+                        effective = update.effective_message
+                        if effective:
+                            await effective.reply_text(text, parse_mode="HTML")
+                            menu_target = effective
+                    if menu_target:
+                        await self._restore_main_menu(menu_target, user_id)
                 except TelegramError:
                     pass
                 finally:

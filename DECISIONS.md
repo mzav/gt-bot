@@ -133,4 +133,25 @@ Telegram Desktop may show a START button on the first click of a deep link and o
 
 ---
 
+## 006 · Main menu visibility
+
+**Date:** 2026-06-19
+**Status:** Decided
+
+### Decision
+Hide the reply-keyboard main menu only during the edit-meeting text-input flow. Restore it when a conversation ends (success, cancel, or `/start` escape) via a persistent `reply_text("Готово", reply_markup=menu)` message.
+
+### Reasoning
+- Edit flow hides the menu so reply-keyboard buttons do not intercept free-text input (topic, description, etc.).
+- Mid-flow steps (edit menu, month/time pickers, photo) keep inline keyboards only — no main menu restore.
+- `edit_message_text` cannot attach `ReplyKeyboardMarkup`; create completion also needs an inline Google Calendar button, so a second message is required to restore the menu.
+- A delete-trick (`reply_text(".")` then `delete()`) was tried to avoid an extra message, but Telegram clients often drop the keyboard when the trigger message is deleted immediately.
+
+### Implementation
+- `_hide_main_menu` — hide on edit start (unchanged)
+- `_restore_main_menu` — send persistent `FLOW_DONE_MESSAGE` ("Готово") with main menu after edit/create success
+- `_finish_conversation_cancel` — attach menu to the cancel reply (unchanged)
+
+---
+
 <!-- Add new entries above this line, incrementing the number. -->

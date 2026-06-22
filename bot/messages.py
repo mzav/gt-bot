@@ -2,6 +2,8 @@
 
 from .main_menu import MENU_CREATE, MENU_HELP, MENU_MEETINGS, MENU_MY
 
+FLOW_DONE_MESSAGE = "Готово"
+
 RESTRICTED_ACCESS_MESSAGE = (
     "Привет 🌿\n\n"
     "Этот бот доступен только участницам закрытого сообщества.\n\n"
