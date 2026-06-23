@@ -23,6 +23,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from .access_control import has_community_access, is_channel_member
+from .announce_schedule import reg_start_at_announce_time
 from .config import Settings
 from .google_calendar import (
     build_calendar_offer,
@@ -182,6 +183,14 @@ class BotApp:
         self.waitlist = waitlist
         self.local_tz = tz.gettz(settings.tz)
         self.bot_username: str | None = settings.telegram_bot_username
+
+    def _announce_time_of_day(self):
+        return self.settings.announce_config().time_of_day
+
+    async def _maybe_replan_urgent_announce(self, meeting: Meeting | None) -> None:
+        if meeting is None or meeting.urgent_announce_posted_at_utc is not None:
+            return
+        await self.scheduler.plan_urgent_announcement(meeting)
 
     def build(self) -> Application:
         """Create and configure the PTB Application with command handlers."""
@@ -1457,6 +1466,8 @@ class BotApp:
             if not meeting:
                 await cq.edit_message_text("Встреча не найдена.")
                 return ConversationHandler.END
+            meeting = await self.db.get_meeting(meeting_id)
+            await self._maybe_replan_urgent_announce(meeting)
             await cq.edit_message_text(
                 self._format_edit_menu_text(meeting, "✅ Начало регистрации обновлено!"),
                 reply_markup=self._build_edit_menu_keyboard(),
@@ -1747,15 +1758,40 @@ class BotApp:
         if result:
             context.user_data["edit_selected_date"] = result
             if picking_reg:
-                await query.edit_message_text(
-                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час открытия регистрации:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
+                meeting_id = context.user_data.get("edit_meeting_id")
+                meeting = await self.db.get_meeting(meeting_id) if meeting_id else None
+                if not meeting:
+                    await query.edit_message_text("Сессия истекла. Начни редактирование заново.")
+                    return ConversationHandler.END
+                announce_time = self._announce_time_of_day()
+                reg_utc = reg_start_at_announce_time(result, announce_time, self.local_tz)
+                meeting_start = ensure_utc(meeting.start_at_utc)
+                if reg_utc > meeting_start:
+                    await query.edit_message_text(
+                        "День открытия регистрации не может быть позже начала встречи. "
+                        "Выбери другой день:",
+                        reply_markup=append_cancel_row(key),
+                    )
+                    return self.STATE_EDIT_DATE
+                meeting = await self.db.update_meeting(
+                    meeting_id, registration_starts_at_utc=reg_utc
                 )
-            else:
+                context.user_data.pop("edit_picking_reg_start", None)
+                await self._maybe_replan_urgent_announce(meeting)
+                time_label = announce_time.strftime("%H:%M")
                 await query.edit_message_text(
-                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
+                    self._format_edit_menu_text(
+                        meeting,
+                        f"✅ Регистрация откроется {result:%d.%m.%Y} в {time_label}.",
+                    ),
+                    reply_markup=self._build_edit_menu_keyboard(),
+                    parse_mode="HTML",
                 )
+                return self.STATE_EDIT_MENU
+            await query.edit_message_text(
+                f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
             return self.STATE_EDIT_HOUR
 
         return self.STATE_EDIT_DATE
@@ -1853,23 +1889,9 @@ class BotApp:
         )
         value_utc = local_dt.astimezone(tz.UTC)
 
-        if context.user_data.get("edit_picking_reg_start"):
-            meeting = await self.db.get_meeting(meeting_id)
-            if meeting and value_utc > ensure_utc(meeting.start_at_utc):
-                await query.edit_message_text(
-                    "Время открытия регистрации не может быть позже начала встречи. "
-                    "Выбери другое время:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
-                )
-                return self.STATE_EDIT_HOUR
-            meeting = await self.db.update_meeting(
-                meeting_id, registration_starts_at_utc=value_utc
-            )
-            context.user_data.pop("edit_picking_reg_start", None)
-            notice = "✅ Начало регистрации обновлено!"
-        else:
-            meeting = await self.db.update_meeting(meeting_id, start_at_utc=value_utc)
-            notice = "✅ Дата и время обновлены!"
+        meeting = await self.db.update_meeting(meeting_id, start_at_utc=value_utc)
+        notice = "✅ Дата и время обновлены!"
+        await self._maybe_replan_urgent_announce(meeting)
 
         if not meeting:
             await query.edit_message_text("Встреча не найдена.")
@@ -2156,15 +2178,30 @@ class BotApp:
         if result:
             context.user_data["selected_date"] = result
             if picking_reg:
+                start_utc = context.user_data.get("selected_start_utc")
+                announce_time = self._announce_time_of_day()
+                reg_utc = reg_start_at_announce_time(result, announce_time, self.local_tz)
+                if start_utc and reg_utc > ensure_utc(start_utc):
+                    await query.edit_message_text(
+                        "День открытия регистрации не может быть позже начала встречи. "
+                        "Выбери другой день:",
+                        reply_markup=append_cancel_row(key),
+                    )
+                    return self.STATE_DATE
+                context.user_data["selected_reg_start_utc"] = reg_utc
+                context.user_data.pop("picking_reg_start", None)
+                time_label = announce_time.strftime("%H:%M")
                 await query.edit_message_text(
-                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час открытия регистрации:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
+                    f"📅 Регистрация откроется {result:%d.%m.%Y} в {time_label}.\n\n"
+                    "📸 Хочешь добавить фото к встрече? (необязательно)\n"
+                    "Отправь фото или нажми «Пропустить».",
+                    reply_markup=photo_skip_keyboard(),
                 )
-            else:
-                await query.edit_message_text(
-                    f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
-                )
+                return self.STATE_PHOTO
+            await query.edit_message_text(
+                f"📅 Дата: {result:%d.%m.%Y}\n\n🕐 Выбери час начала встречи:",
+                reply_markup=TimePickerKeyboard.build_hours(),
+            )
             return self.STATE_HOUR
 
         return self.STATE_DATE
@@ -2259,25 +2296,6 @@ class BotApp:
             minute=minute,
             tzinfo=self.local_tz
         )
-
-        if context.user_data.get("picking_reg_start"):
-            start_utc = context.user_data.get("selected_start_utc")
-            reg_utc = local_dt.astimezone(tz.UTC)
-            if start_utc and reg_utc > start_utc:
-                await query.edit_message_text(
-                    "Время открытия регистрации не может быть позже начала встречи. "
-                    "Выбери другое время:",
-                    reply_markup=TimePickerKeyboard.build_hours(),
-                )
-                return self.STATE_HOUR
-            context.user_data["selected_reg_start_utc"] = reg_utc
-            context.user_data.pop("picking_reg_start", None)
-            await query.edit_message_text(
-                "📸 Хочешь добавить фото к встрече? (необязательно)\n"
-                "Отправь фото или нажми «Пропустить».",
-                reply_markup=photo_skip_keyboard(),
-            )
-            return self.STATE_PHOTO
 
         context.user_data["selected_start_utc"] = local_dt.astimezone(tz.UTC)
         await query.edit_message_text(
@@ -2460,7 +2478,7 @@ class BotApp:
             location=location,
             photo_file_id=photo_file_id,
         )
-        await self.scheduler.maybe_announce_new_meeting(meeting)
+        await self.scheduler.plan_urgent_announcement(meeting)
         log_event(
             logger,
             logging.INFO,

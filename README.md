@@ -29,7 +29,8 @@ This bot helps members to:
 - Announcements
   - Twice per month, publish a digest/announcement post to a dedicated Telegram channel (GirlTalkAnnouncements)
   - Each announced meeting includes a CTA button linking to the bot with that meeting pre-selected
-  - Spontaneous and same-day meeting posts also include the CTA button
+  - Urgent pre-announcements for meetings not covered by the next digest (immediate if registration opens now, otherwise at `ANNOUNCE_TIME` on the registration-open day)
+  - Same-day meeting posts also include the CTA button
 
 ## Tech stack
 - python-telegram-bot (PTB) >= 21.5 — async Telegram Bot API framework
@@ -58,6 +59,7 @@ bot/
   handlers.py        — PTB command and callback handlers
   keyboards.py       — inline keyboard builders
   links.py           — meeting deep-link builders and /start payload parsing
+  announce_schedule.py — urgent announcement scheduling logic
   scheduler.py       — APScheduler jobs (reminders, announcements, host DMs)
   utils.py           — shared formatting helpers
   log_context.py     — structured logging helpers (user/flow correlation)
@@ -180,7 +182,7 @@ https://t.me/<BOT_USERNAME>?start=m_<public_token>
 
 **Channel announcements** include a CTA built from this link:
 - Twice-monthly digest — one packed message listing all meetings, each with an HTML deep link in the text
-- Spontaneous new-meeting posts — HTML deep link in the post text (not an inline keyboard button)
+- Spontaneous new-meeting posts — HTML deep link in the post text (not an inline keyboard button); published when registration opens (see below)
 - Same-day “meeting today” posts — HTML deep link in the post text
 
 Channel posts use HTML links rather than inline URL buttons under the post, because `reply_markup` on a channel post replaces the “Leave a comment” button when the channel has a linked discussion group.
@@ -210,7 +212,9 @@ Channel posts use HTML links rather than inline URL buttons under the post, beca
 - Announcement jobs:
   - Twice per month on set days (e.g., 1 and 15) at `ANNOUNCE_TIME` in `TIMEZONE`
   - Post a digest of upcoming meetings to `ANNOUNCEMENTS_CHANNEL_ID` (one message, deep-link per meeting)
+  - Daily at `ANNOUNCE_TIME`: publish pending urgent pre-announcements (meetings not covered by an upcoming digest)
   - Daily job at `DAILY_CHECK_TIME` posts same-day meetings to the channel with CTA buttons
+- Registration open time: when creating a meeting, the host picks a day for registration to open (or “immediately”). Delayed registration always opens at `ANNOUNCE_TIME` on that day; the urgent channel post uses the same schedule.
 
 APScheduler uses `AsyncIOScheduler` with timezone from `TIMEZONE`. Jobs are rehydrated on startup from the database.
 

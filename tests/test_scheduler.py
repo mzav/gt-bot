@@ -127,6 +127,87 @@ async def test_meeting_deep_link_missing_username(db):
 
 
 @pytest.mark.asyncio
+async def test_plan_urgent_announcement_publishes_immediately(db):
+    scheduler, send_channel_card, _ = _make_scheduler(db, channel_id=-100)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 12, 25, 18, 0, 0, tzinfo=timezone.utc),
+    )
+    meeting = await db.get_meeting(meeting_id)
+    await scheduler.plan_urgent_announcement(meeting)
+    send_channel_card.assert_awaited_once()
+    updated = await db.get_meeting(meeting_id)
+    assert updated.urgent_announce_posted_at_utc is not None
+
+
+@pytest.mark.asyncio
+async def test_plan_urgent_announcement_skips_digest(db):
+    scheduler, send_channel_card, _ = _make_scheduler(db, channel_id=-100)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 7, 5, 18, 0, 0, tzinfo=timezone.utc),
+    )
+    meeting = await db.get_meeting(meeting_id)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 6, 23, 12, 0, 0, tzinfo=scheduler._tz)
+        await scheduler.plan_urgent_announcement(meeting)
+    send_channel_card.assert_not_awaited()
+    updated = await db.get_meeting(meeting_id)
+    assert updated.urgent_announce_at_utc is None
+
+
+@pytest.mark.asyncio
+async def test_plan_urgent_announcement_defers_to_reg_start(db):
+    scheduler, send_channel_card, _ = _make_scheduler(db, channel_id=-100)
+    host_id = await create_host(db)
+    berlin = scheduler._tz
+    reg_start = datetime(2026, 6, 24, 8, 0, 0, tzinfo=timezone.utc)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 6, 25, 16, 0, 0, tzinfo=timezone.utc),
+        registration_starts_at_utc=reg_start,
+    )
+    meeting = await db.get_meeting(meeting_id)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 6, 23, 12, 0, 0, tzinfo=berlin)
+        await scheduler.plan_urgent_announcement(meeting)
+    send_channel_card.assert_not_awaited()
+    updated = await db.get_meeting(meeting_id)
+    from bot.utils import ensure_utc
+    assert ensure_utc(updated.urgent_announce_at_utc) == reg_start
+    assert updated.urgent_announce_posted_at_utc is None
+
+
+@pytest.mark.asyncio
+async def test_urgent_announce_job_publishes_pending(db):
+    scheduler, send_channel_card, _ = _make_scheduler(db, channel_id=-100)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 6, 25, 16, 0, 0, tzinfo=timezone.utc),
+    )
+    due = datetime(2026, 6, 24, 8, 0, 0, tzinfo=timezone.utc)
+    await db.update_meeting_urgent_announce_schedule(meeting_id, due)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.utc_now", return_value=due):
+        await scheduler._urgent_announce_job()
+    send_channel_card.assert_awaited_once()
+    updated = await db.get_meeting(meeting_id)
+    assert updated.urgent_announce_posted_at_utc is not None
+
+
+@pytest.mark.asyncio
 async def test_maybe_announce_new_meeting_sends(db):
     scheduler, send_channel_card, _ = _make_scheduler(db, channel_id=-100)
     host_id = await create_host(db)

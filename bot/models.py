@@ -48,6 +48,8 @@ class Meeting(Base):
     canceled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     public_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    urgent_announce_at_utc: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    urgent_announce_posted_at_utc: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     host: Mapped[User] = relationship("User", back_populates="hosted_meetings")
     registrations: Mapped[list[Registration]] = relationship("Registration", back_populates="meeting", cascade="all, delete-orphan")

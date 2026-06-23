@@ -1,7 +1,6 @@
 """Scheduling utilities for reminders and announcements using APScheduler."""
 from __future__ import annotations
 
-import calendar
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -15,6 +14,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from dateutil import tz
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
+from .announce_schedule import (
+    _announcement_window,
+    _covered_by_future_announcement,
+    compute_urgent_announce_at,
+)
 from .links import build_meeting_deep_link, build_telegram_user_link, meeting_channel_cta_keyboard
 from .log_context import log_event, user_log_fields
 from .storage import Database
@@ -27,53 +31,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Days before the second (and further) announce day to start the coverage window.
-# E.g. announce on 15th → cover meetings from 18th onward.
-_NEXT_WINDOW_OFFSET_DAYS = 3
-
 # Telegram message character limit
 _TG_MAX_MESSAGE_LEN = 4096
-
-
-def _announcement_window(announce_days: list[int], today: date) -> tuple[date, date]:
-    """Return the (from_date, to_date) coverage window for today's announcement.
-
-    First announce day of the month → whole month.
-    Subsequent days → today + _NEXT_WINDOW_OFFSET_DAYS through end of month.
-    """
-    month_start = today.replace(day=1)
-    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
-    if today.day == min(announce_days):
-        return month_start, month_end
-    from_date = today + timedelta(days=_NEXT_WINDOW_OFFSET_DAYS)
-    return from_date, month_end
-
-
-def _covered_by_future_announcement(meeting_date: date, today: date, announce_days: list[int]) -> bool:
-    """Return True if meeting_date will appear in a scheduled digest before it occurs.
-
-    Looks ahead up to 2 months (current + next). An announce day on or after the meeting itself
-    doesn't count — same-day is handled by the daily check job.
-    """
-    sorted_days = sorted(announce_days)
-    year, month = today.year, today.month
-    for _ in range(2):
-        for d in sorted_days:
-            try:
-                announce_date = date(year, month, d)
-            except ValueError:
-                continue
-            if announce_date <= today or announce_date >= meeting_date:
-                continue
-            from_date, to_date = _announcement_window(sorted_days, announce_date)
-            if from_date <= meeting_date <= to_date:
-                return True
-        month += 1
-        if month > 12:
-            month, year = 1, year + 1
-        if date(year, month, 1) > meeting_date:
-            break
-    return False
 
 
 def _format_spots_line(available: int, *, emoji: str = "🌻") -> str:
@@ -409,6 +368,35 @@ class BotScheduler:
         for message in _split_messages(header, cards):
             await self._send_channel_card(channel_id, message, None)
 
+    def schedule_urgent_announcements(self, t: time, channel_id: int | None) -> None:
+        """Schedule a daily job to publish pending urgent meeting announcements."""
+        if not channel_id:
+            return
+        self._channel_id = channel_id
+        self.scheduler.add_job(
+            self._urgent_announce_job,
+            trigger=CronTrigger(hour=t.hour, minute=t.minute),
+            id="urgent_announce_job",
+            replace_existing=True,
+        )
+
+    async def _urgent_announce_job(self) -> None:
+        """Publish all meetings whose urgent announcement is due."""
+        if not self._channel_id:
+            return
+        now_utc = utc_now()
+        meetings = await self.db.list_meetings_pending_urgent_announce(now_utc)
+        log_event(
+            log,
+            logging.INFO,
+            "scheduler_urgent_announce",
+            channel_id=self._channel_id,
+            meeting_count=len(meetings),
+        )
+        for meeting in meetings:
+            await self._publish_urgent_announcement(meeting)
+            await self.db.mark_urgent_announce_posted(meeting.id, now_utc)
+
     def schedule_host_notifications(self, interval_minutes: int) -> None:
         """Register a periodic job to flush batched participant-change DMs to hosts."""
         if not self._bot:
@@ -542,16 +530,33 @@ class BotScheduler:
                 **user_log_fields(user_id=host_id, username=host.username if host else None),
             )
 
-    async def maybe_announce_new_meeting(self, meeting: Meeting) -> None:
-        """Send an immediate channel announcement if the meeting won't appear in any future digest.
-
-        No-op if no channel is configured or the meeting will be covered by a scheduled announcement.
-        """
+    async def plan_urgent_announcement(self, meeting: Meeting) -> None:
+        """Compute, persist, and optionally publish an urgent channel announcement."""
         if not self._channel_id:
             return
-        meeting_date = ensure_utc(meeting.start_at_utc).astimezone(self._tz).date()
+        if meeting.urgent_announce_posted_at_utc is not None:
+            return
         today = datetime.now(self._tz).date()
-        if _covered_by_future_announcement(meeting_date, today, self._announce_days):
+        at = compute_urgent_announce_at(
+            meeting_start_at_utc=meeting.start_at_utc,
+            registration_starts_at_utc=meeting.registration_starts_at_utc,
+            reference_date=today,
+            announce_days=self._announce_days,
+            created_at_utc=ensure_utc(meeting.created_at),
+            local_tz=self._tz,
+        )
+        await self.db.update_meeting_urgent_announce_schedule(meeting.id, at)
+        if at is not None and at <= utc_now():
+            await self._publish_urgent_announcement(meeting)
+            await self.db.mark_urgent_announce_posted(meeting.id, utc_now())
+
+    async def maybe_announce_new_meeting(self, meeting: Meeting) -> None:
+        """Deprecated alias for plan_urgent_announcement."""
+        await self.plan_urgent_announcement(meeting)
+
+    async def _publish_urgent_announcement(self, meeting: Meeting) -> None:
+        """Send an immediate channel announcement for a single meeting."""
+        if not self._channel_id:
             return
         available = await self.db.available_spots(meeting.id)
         host = await self.db.get_user(meeting.created_by)

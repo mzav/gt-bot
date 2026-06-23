@@ -569,6 +569,46 @@ class Database:
                 )
             return m
 
+    async def update_meeting_urgent_announce_schedule(
+        self, meeting_id: int, at_utc: datetime | None
+    ) -> Meeting | None:
+        """Set or clear the planned urgent announcement time."""
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None:
+                return None
+            m.urgent_announce_at_utc = at_utc
+            await s.commit()
+            await s.refresh(m)
+            return m
+
+    async def mark_urgent_announce_posted(
+        self, meeting_id: int, posted_at_utc: datetime
+    ) -> Meeting | None:
+        """Record that the urgent channel announcement was published."""
+        async with self.session() as s:
+            m = await s.get(Meeting, meeting_id)
+            if m is None:
+                return None
+            m.urgent_announce_posted_at_utc = posted_at_utc
+            await s.commit()
+            await s.refresh(m)
+            return m
+
+    async def list_meetings_pending_urgent_announce(self, now_utc: datetime) -> Sequence[Meeting]:
+        """List meetings due for urgent channel announcement."""
+        now_utc = ensure_utc(now_utc)
+        async with self.session() as s:
+            res = await s.execute(
+                select(Meeting).where(
+                    Meeting.canceled_at.is_(None),
+                    Meeting.urgent_announce_at_utc.is_not(None),
+                    Meeting.urgent_announce_at_utc <= now_utc,
+                    Meeting.urgent_announce_posted_at_utc.is_(None),
+                )
+            )
+            return res.scalars().all()
+
     # Waitlist
     async def get_active_waitlist_entry(self, meeting_id: int, user_id: int) -> WaitlistEntry | None:
         """Return the user's active waitlist entry for a meeting, if any."""

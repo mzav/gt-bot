@@ -69,6 +69,16 @@ async def _run_migrations(engine, db: Database) -> None:
             await conn.commit()
         except OperationalError:
             pass
+        try:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN urgent_announce_at_utc DATETIME"))
+            await conn.commit()
+        except OperationalError:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN urgent_announce_posted_at_utc DATETIME"))
+            await conn.commit()
+        except OperationalError:
+            pass
 
     backfilled = await db.backfill_meeting_public_tokens()
     if backfilled:
@@ -165,6 +175,7 @@ async def main_async() -> None:
     # Announcements schedule
     announce_conf = settings.announce_config()
     scheduler.schedule_announcements(announce_conf.days, announce_conf.time_of_day, settings.announcements_channel_id)
+    scheduler.schedule_urgent_announcements(announce_conf.time_of_day, settings.announcements_channel_id)
     scheduler.schedule_daily_reminders(settings.daily_check_time_parsed(), settings.announcements_channel_id)
     scheduler.schedule_participant_reminders(settings.daily_check_time_parsed())
     scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)

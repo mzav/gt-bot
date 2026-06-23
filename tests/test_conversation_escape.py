@@ -223,7 +223,7 @@ async def test_create_meeting_photo_ends_even_if_restore_main_menu_fails(app, db
     update.message = message
     update.callback_query = None
 
-    app.scheduler.maybe_announce_new_meeting = AsyncMock()
+    app.scheduler.plan_urgent_announcement = AsyncMock()
     app._restore_main_menu = AsyncMock(side_effect=BadRequest("restore failed"))
 
     gated = app._community_gated(app._create_meeting_photo, conv=True)

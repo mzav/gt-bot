@@ -98,7 +98,7 @@ def make_app(
     if scheduler is None:
         scheduler = MagicMock()
         scheduler.on_participant_change = AsyncMock()
-        scheduler.maybe_announce_new_meeting = AsyncMock()
+        scheduler.plan_urgent_announcement = AsyncMock()
         scheduler.run_announcement_now = AsyncMock()
         scheduler._bot = MagicMock()
     app = BotApp(settings, db, scheduler, waitlist)

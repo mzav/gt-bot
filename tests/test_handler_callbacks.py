@@ -22,7 +22,7 @@ from tests.conftest import (
 async def app(db, waitlist):
     scheduler = MagicMock()
     scheduler.on_participant_change = AsyncMock()
-    scheduler.maybe_announce_new_meeting = AsyncMock()
+    scheduler.plan_urgent_announcement = AsyncMock()
     scheduler.run_announcement_now = AsyncMock()
     scheduler._bot = MagicMock()
     return make_app(db, waitlist, scheduler=scheduler)

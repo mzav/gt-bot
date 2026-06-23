@@ -16,7 +16,7 @@ from tests.conftest import create_host, make_app, make_callback_update, make_con
 async def app(db, waitlist):
     scheduler = MagicMock()
     scheduler.on_participant_change = AsyncMock()
-    scheduler.maybe_announce_new_meeting = AsyncMock()
+    scheduler.plan_urgent_announcement = AsyncMock()
     scheduler.run_announcement_now = AsyncMock()
     scheduler._bot = MagicMock()
     return make_app(db, waitlist, scheduler=scheduler)
@@ -54,7 +54,7 @@ async def test_create_meeting_happy_path_skip_photo(app, db):
     app._restore_main_menu = AsyncMock()
     result = await app._create_meeting_photo(update, context)
     assert result == ConversationHandler.END
-    app.scheduler.maybe_announce_new_meeting.assert_awaited_once()
+    app.scheduler.plan_urgent_announcement.assert_awaited_once()
     meetings = await db.list_upcoming_meetings(datetime.now(timezone.utc))
     assert any(m.topic == "Coffee Chat" for m in meetings)
 

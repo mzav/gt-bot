@@ -13,7 +13,7 @@ from tests.conftest import create_host, create_meeting, make_app, make_callback_
 async def app(db, waitlist):
     scheduler = type("S", (), {})()
     scheduler.on_participant_change = AsyncMock()
-    scheduler.maybe_announce_new_meeting = AsyncMock()
+    scheduler.plan_urgent_announcement = AsyncMock()
     scheduler.run_announcement_now = AsyncMock()
     scheduler._bot = AsyncMock()
     return make_app(db, waitlist, scheduler=scheduler)
