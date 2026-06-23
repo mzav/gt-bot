@@ -168,6 +168,22 @@ async def test_count_hosts_and_available_spots(db, waitlist, now_utc):
 
 
 @pytest.mark.asyncio
+async def test_urgent_announce_storage(db):
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    due = datetime(2026, 6, 24, 8, 0, 0, tzinfo=timezone.utc)
+    await db.update_meeting_urgent_announce_schedule(meeting_id, due)
+    pending = await db.list_meetings_pending_urgent_announce(
+        datetime(2026, 6, 24, 9, 0, 0, tzinfo=timezone.utc)
+    )
+    assert [m.id for m in pending] == [meeting_id]
+    posted_at = datetime(2026, 6, 24, 9, 0, 0, tzinfo=timezone.utc)
+    await db.mark_urgent_announce_posted(meeting_id, posted_at)
+    pending_after = await db.list_meetings_pending_urgent_announce(posted_at)
+    assert pending_after == []
+
+
+@pytest.mark.asyncio
 async def test_participant_reminder_dedup(db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
