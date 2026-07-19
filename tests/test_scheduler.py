@@ -133,10 +133,14 @@ async def test_plan_urgent_announcement_publishes_immediately(db):
     meeting_id = await create_meeting(
         db,
         host_id,
-        start_at_utc=datetime(2026, 12, 25, 18, 0, 0, tzinfo=timezone.utc),
+        start_at_utc=datetime(2026, 7, 14, 16, 0, 0, tzinfo=timezone.utc),
     )
     meeting = await db.get_meeting(meeting_id)
-    await scheduler.plan_urgent_announcement(meeting)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 1, 12, 0, 0, tzinfo=scheduler._tz)
+        await scheduler.plan_urgent_announcement(meeting)
     send_channel_card.assert_awaited_once()
     updated = await db.get_meeting(meeting_id)
     assert updated.urgent_announce_posted_at_utc is not None
@@ -177,8 +181,11 @@ async def test_plan_urgent_announcement_defers_to_reg_start(db):
     meeting = await db.get_meeting(meeting_id)
     from unittest.mock import patch
 
-    with patch("bot.scheduler.datetime") as mock_dt:
-        mock_dt.now.return_value = datetime(2026, 6, 23, 12, 0, 0, tzinfo=berlin)
+    now = datetime(2026, 6, 23, 12, 0, 0, tzinfo=berlin)
+    with patch("bot.scheduler.datetime") as mock_dt, patch(
+        "bot.scheduler.utc_now", return_value=datetime(2026, 6, 23, 10, 0, 0, tzinfo=timezone.utc)
+    ):
+        mock_dt.now.return_value = now
         await scheduler.plan_urgent_announcement(meeting)
     send_channel_card.assert_not_awaited()
     updated = await db.get_meeting(meeting_id)
@@ -214,10 +221,14 @@ async def test_maybe_announce_new_meeting_sends(db):
     meeting_id = await create_meeting(
         db,
         host_id,
-        start_at_utc=datetime(2026, 12, 25, 18, 0, 0, tzinfo=timezone.utc),
+        start_at_utc=datetime(2026, 7, 14, 16, 0, 0, tzinfo=timezone.utc),
     )
     meeting = await db.get_meeting(meeting_id)
-    await scheduler.maybe_announce_new_meeting(meeting)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 1, 12, 0, 0, tzinfo=scheduler._tz)
+        await scheduler.maybe_announce_new_meeting(meeting)
     send_channel_card.assert_awaited_once()
 
 

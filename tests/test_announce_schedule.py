@@ -45,6 +45,20 @@ def test_covered_by_future_announcement_same_day_not_counted():
     assert covered_by_future_announcement(meeting_date, today, [1, 15]) is False
 
 
+def test_covered_by_future_announcement_july1_scenario():
+    today = date(2026, 7, 1)
+    days = [1, 15]
+    assert covered_by_future_announcement(date(2026, 7, 14), today, days) is False
+    assert covered_by_future_announcement(date(2026, 8, 1), today, days) is True
+    assert covered_by_future_announcement(date(2026, 8, 7), today, days) is True
+    assert covered_by_future_announcement(date(2026, 9, 11), today, days) is True
+
+
+def test_covered_by_future_announcement_far_ahead():
+    today = date(2026, 7, 1)
+    assert covered_by_future_announcement(date(2026, 10, 20), today, [1, 15]) is True
+
+
 def test_reg_start_at_announce_time(berlin_tz):
     reg_day = date(2026, 6, 24)
     announce_time = time(10, 0)
