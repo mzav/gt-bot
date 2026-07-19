@@ -1,6 +1,7 @@
 """Scheduling utilities for reminders and announcements using APScheduler."""
 from __future__ import annotations
 
+import html
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from .announce_schedule import (
     _covered_by_future_announcement,
     compute_urgent_announce_at,
 )
+from .cancellation_confirmation import format_host_reason
 from .links import build_meeting_deep_link, build_telegram_user_link, meeting_channel_cta_keyboard
 from .log_context import log_event, user_log_fields
 from .storage import Database
@@ -33,6 +35,16 @@ log = logging.getLogger(__name__)
 
 # Telegram message character limit
 _TG_MAX_MESSAGE_LEN = 4096
+
+
+def format_user_html(*, user_id: int, name: str | None, username: str | None) -> str:
+    """Format a user as an HTML profile link, with @username when available."""
+    label = html.escape(name or (f"@{username}" if username else f"User#{user_id}"))
+    href = html.escape(build_telegram_user_link(user_id, username), quote=True)
+    text = f'<a href="{href}">{label}</a>'
+    if username and name:
+        text += f" (@{html.escape(username)})"
+    return text
 
 
 def _format_spots_line(available: int, *, emoji: str = "🌻") -> str:
@@ -166,16 +178,52 @@ def _split_messages(header: str, cards: list[str], max_len: int = _TG_MAX_MESSAG
 
 @dataclass
 class _ParticipantEvent:
-    user_name: str
+    user_id: int
+    name: str | None
+    username: str | None
     event: Literal["joined", "left"]
+    reason_type: str | None = None
+    reason_text: str | None = None
+    offered_user_id: int | None = None
+    offered_name: str | None = None
+    offered_username: str | None = None
     at: datetime = field(default_factory=utc_now)
 
+    def user_html(self) -> str:
+        return format_user_html(user_id=self.user_id, name=self.name, username=self.username)
 
-def _display_name(user: User) -> str:
-    """Format a display name, appending @username when available."""
-    if user.username:
-        return f"{user.name} (@{user.username})" if user.name else f"@{user.username}"
-    return user.name or f"User#{user.id}"
+    def reason_label(self) -> str | None:
+        return format_host_reason(self.reason_type, self.reason_text)
+
+    def offered_user_html(self) -> str | None:
+        if self.offered_user_id is None:
+            return None
+        return format_user_html(
+            user_id=self.offered_user_id,
+            name=self.offered_name,
+            username=self.offered_username,
+        )
+
+
+def _participant_event_from_user(
+    user: User,
+    event: Literal["joined", "left"],
+    *,
+    reason_type: str | None = None,
+    reason_text: str | None = None,
+    offered_user: User | None = None,
+) -> _ParticipantEvent:
+    return _ParticipantEvent(
+        user_id=user.id,
+        name=user.name,
+        username=user.username,
+        event=event,
+        reason_type=reason_type,
+        reason_text=reason_text,
+        offered_user_id=offered_user.id if offered_user else None,
+        offered_name=offered_user.name if offered_user else None,
+        offered_username=offered_user.username if offered_user else None,
+    )
 
 
 class BotScheduler:
@@ -442,16 +490,25 @@ class BotScheduler:
         user: User,
         event: Literal["joined", "left"],
         confirmed_count: int,
+        *,
+        reason_type: str | None = None,
+        reason_text: str | None = None,
+        offered_user: User | None = None,
     ) -> None:
         """Route a signup or cancellation to instant DM or the batch queue."""
         if not self._bot:
             return
+        evt = _participant_event_from_user(
+            user,
+            event,
+            reason_type=reason_type,
+            reason_text=reason_text,
+            offered_user=offered_user,
+        )
         if confirmed_count < self._notify_threshold:
-            await self._send_instant_notification(meeting, user, event, confirmed_count)
+            await self._send_instant_notification(meeting, evt, confirmed_count)
         else:
-            self._pending_events[meeting.id].append(
-                _ParticipantEvent(user_name=_display_name(user), event=event)
-            )
+            self._pending_events[meeting.id].append(evt)
         log_event(
             log,
             logging.INFO,
@@ -465,17 +522,25 @@ class BotScheduler:
     async def _send_instant_notification(
         self,
         meeting: Meeting,
-        user: User,
-        event: Literal["joined", "left"],
+        evt: _ParticipantEvent,
         confirmed_count: int,
     ) -> None:
-        icon = "➕" if event == "joined" else "➖"
-        action = "записалась на" if event == "joined" else "отменила участие в"
-        text = (
-            f"{icon} <b>{_display_name(user)}</b> {action} «{meeting.topic}»\n"
-            f"Участников: {confirmed_count} / {meeting.max_participants}"
-        )
-        await self._send_host_dm(meeting.created_by, text)
+        icon = "➕" if evt.event == "joined" else "➖"
+        action = "записалась на" if evt.event == "joined" else "отменила участие в"
+        lines = [
+            f"{icon} {evt.user_html()} {action} «{html.escape(meeting.topic)}»",
+        ]
+        if evt.event == "left":
+            reason = evt.reason_label() or "не указана"
+            lines.append(f"Причина: {html.escape(reason)}")
+        lines.append(f"Участников: {confirmed_count} / {meeting.max_participants}")
+        if evt.event == "left":
+            offered = evt.offered_user_html()
+            if offered:
+                lines.append(f"Отправлено приглашение: {offered}")
+            else:
+                lines.append("В waitlist никого нет — место свободно")
+        await self._send_host_dm(meeting.created_by, "\n".join(lines))
 
     async def _flush_pending_notifications(self) -> None:
         """Send batched digest DMs for all meetings with queued events, then clear the queue."""
@@ -492,25 +557,40 @@ class BotScheduler:
             if not meeting or meeting.canceled_at:
                 continue
 
-            joined = sum(1 for e in events if e.event == "joined")
-            left = sum(1 for e in events if e.event == "left")
+            joined = [e for e in events if e.event == "joined"]
+            left = [e for e in events if e.event == "left"]
             confirmed = await self.db.count_confirmed(meeting_id)
 
             parts = []
             if joined:
-                parts.append(f"+{joined} записались")
+                parts.append(f"+{len(joined)} записались")
             if left:
-                parts.append(f"−{left} отменили")
+                parts.append(f"−{len(left)} отменили")
 
-            text = (
-                f"📊 <b>Обновление участников — «{meeting.topic}»</b>\n"
-                f"{', '.join(parts)}\n"
-                f"Сейчас: {confirmed} / {meeting.max_participants}"
-            )
+            lines = [
+                f"📊 <b>Обновление участников — «{html.escape(meeting.topic)}»</b>",
+                ", ".join(parts),
+                f"Сейчас: {confirmed} / {meeting.max_participants}",
+            ]
+            if joined:
+                lines.append("")
+                lines.append("<b>Записались:</b>")
+                for e in joined:
+                    lines.append(f"• {e.user_html()}")
+            if left:
+                lines.append("")
+                lines.append("<b>Отменили:</b>")
+                for e in left:
+                    reason = e.reason_label()
+                    suffix = f" ({html.escape(reason)})" if reason else ""
+                    lines.append(f"• {e.user_html()}{suffix}")
+                    offered = e.offered_user_html()
+                    if offered:
+                        lines.append(f"  → приглашение: {offered}")
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Посмотреть список", callback_data=f"participants:{meeting_id}")
             ]])
-            await self._send_host_dm(meeting.created_by, text, reply_markup=keyboard)
+            await self._send_host_dm(meeting.created_by, "\n".join(lines), reply_markup=keyboard)
 
     async def _send_host_dm(self, host_id: int, text: str, *, reply_markup=None) -> None:
         """Send a DM to the meeting host, logging and suppressing send errors."""

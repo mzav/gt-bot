@@ -74,9 +74,58 @@ async def test_on_participant_change_instant_below_threshold(db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
     meeting = await db.get_meeting(meeting_id)
-    user = await db.get_user(host_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
     await scheduler.on_participant_change(meeting, user, "joined", confirmed_count=1)
     bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Anna Test" in text
+    assert "@anna" in text
+    assert "Участников: 1 /" in text
+    assert "https://t.me/anna" in text
+
+
+@pytest.mark.asyncio
+async def test_on_participant_change_instant_leave_with_reason(db):
+    scheduler, _, bot = _make_scheduler(db, threshold=10)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    meeting = await db.get_meeting(meeting_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
+    await scheduler.on_participant_change(
+        meeting,
+        user,
+        "left",
+        confirmed_count=2,
+        reason_type="ill",
+    )
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "отменила участие" in text
+    assert "Причина: Болезнь" in text
+    assert "Участников: 2 /" in text
+    assert "В waitlist никого нет" in text
+
+
+@pytest.mark.asyncio
+async def test_on_participant_change_instant_leave_with_waitlist_offer(db):
+    scheduler, _, bot = _make_scheduler(db, threshold=10)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    meeting = await db.get_meeting(meeting_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
+    offered = await db.get_or_create_user(88, "Waitlist Girl", "wluser")
+    await scheduler.on_participant_change(
+        meeting,
+        user,
+        "left",
+        confirmed_count=3,
+        reason_type="family",
+        offered_user=offered,
+    )
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Причина: Семейные обстоятельства" in text
+    assert "Отправлено приглашение:" in text
+    assert "Waitlist Girl" in text
+    assert "@wluser" in text
 
 
 @pytest.mark.asyncio
@@ -97,10 +146,25 @@ async def test_flush_pending_notifications(db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
     meeting = await db.get_meeting(meeting_id)
-    user = await db.get_user(host_id)
-    await scheduler.on_participant_change(meeting, user, "joined", confirmed_count=5)
+    joiner = await db.get_or_create_user(50, "Join Girl", "joiner")
+    leaver = await db.get_or_create_user(51, "Leave Girl", "leaver")
+    await scheduler.on_participant_change(meeting, joiner, "joined", confirmed_count=5)
+    await scheduler.on_participant_change(
+        meeting,
+        leaver,
+        "left",
+        confirmed_count=5,
+        reason_type="other",
+        reason_text="Срочная поездка",
+    )
     await scheduler._flush_pending_notifications()
     bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Записались:" in text
+    assert "Join Girl" in text
+    assert "Отменили:" in text
+    assert "Leave Girl" in text
+    assert "(Срочная поездка)" in text
     assert not scheduler._pending_events
 
 

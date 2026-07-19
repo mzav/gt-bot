@@ -8,6 +8,7 @@ import pytest
 from bot.cancellation_confirmation import (
     CancellationReasonType,
     format_final_confirm,
+    format_host_reason,
     format_reason_prompt,
     parse_leave_confirm_callback,
     parse_leave_reason_callback,
@@ -57,6 +58,14 @@ def test_format_reason_prompt(local_tz):
 
 def test_format_final_confirm_non_empty():
     assert "Отменить участие" in format_final_confirm()
+
+
+def test_format_host_reason():
+    assert format_host_reason(CancellationReasonType.ILL) == "Болезнь"
+    assert format_host_reason(CancellationReasonType.FAMILY) == "Семейные обстоятельства"
+    assert format_host_reason(CancellationReasonType.OTHER, "Срочная поездка") == "Срочная поездка"
+    assert format_host_reason(CancellationReasonType.OTHER, "  ") == "Другое"
+    assert format_host_reason(None) is None
 
 
 @pytest.mark.asyncio

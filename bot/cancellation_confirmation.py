@@ -33,6 +33,22 @@ REASON_LABELS: dict[str, str] = {
     CancellationReasonType.OTHER: "Другое, объясню далее",
 }
 
+HOST_REASON_LABELS: dict[str, str] = {
+    CancellationReasonType.ILL: "Болезнь",
+    CancellationReasonType.FAMILY: "Семейные обстоятельства",
+    CancellationReasonType.OTHER: "Другое",
+}
+
+
+def format_host_reason(reason_type: str | None, reason_text: str | None = None) -> str | None:
+    """Return a host-facing cancellation reason, or None if not provided."""
+    if not reason_type:
+        return None
+    if reason_type == CancellationReasonType.OTHER:
+        text = (reason_text or "").strip()
+        return text or HOST_REASON_LABELS[CancellationReasonType.OTHER]
+    return HOST_REASON_LABELS.get(reason_type, reason_type)
+
 
 @dataclass
 class PreflightResult:

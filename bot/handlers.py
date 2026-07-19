@@ -859,9 +859,16 @@ class BotApp:
             if meeting:
                 db_user = await self.db.get_user(user_id)
                 if db_user:
-                    confirmed = await self.db.count_confirmed(meeting_id)
-                    await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
-                await self._process_waitlist_after_unregister(meeting_id)
+                    notifications = await self._process_waitlist_after_unregister(meeting_id)
+                    await self._notify_host_after_leave(
+                        meeting,
+                        db_user,
+                        reason_type=reason_type,
+                        reason_text=reason_text,
+                        notifications=notifications,
+                    )
+                else:
+                    await self._process_waitlist_after_unregister(meeting_id)
         else:
             err = f"Не удалось отменить участие: {msg}"
             if edit:
@@ -1004,10 +1011,34 @@ class BotApp:
             return
         await send_offer_dms(self.scheduler._bot, self.waitlist, notifications)
 
-    async def _process_waitlist_after_unregister(self, meeting_id: int) -> None:
+    async def _process_waitlist_after_unregister(self, meeting_id: int) -> list[OfferNotification]:
         now_utc = datetime.now(tz.UTC)
         notifications = await self.waitlist.process_available_spots(meeting_id, now_utc)
         await self._send_waitlist_offer_dms(notifications)
+        return notifications
+
+    async def _notify_host_after_leave(
+        self,
+        meeting: Meeting,
+        db_user,
+        *,
+        reason_type: str | None = None,
+        reason_text: str | None = None,
+        notifications: list[OfferNotification] | None = None,
+    ) -> None:
+        confirmed = await self.db.count_confirmed(meeting.id)
+        offered_user = None
+        if notifications:
+            offered_user = await self.db.get_user(notifications[0].user_id)
+        await self.scheduler.on_participant_change(
+            meeting,
+            db_user,
+            "left",
+            confirmed,
+            reason_type=reason_type,
+            reason_text=reason_text,
+            offered_user=offered_user,
+        )
 
     async def _send_upcoming_meeting_entry(
         self,
@@ -2743,9 +2774,12 @@ class BotApp:
         if ok:
             meeting = await self.db.get_meeting(meeting_id)
             if meeting:
-                confirmed = await self.db.count_confirmed(meeting_id)
-                await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
-                await self._process_waitlist_after_unregister(meeting_id)
+                notifications = await self._process_waitlist_after_unregister(meeting_id)
+                await self._notify_host_after_leave(
+                    meeting,
+                    db_user,
+                    notifications=notifications,
+                )
 
     # ========== Callback Query Handlers ==========
 
