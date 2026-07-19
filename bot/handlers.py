@@ -42,7 +42,7 @@ from .meeting_notifications import (
     notify_participants,
     snapshot_meeting,
 )
-from .messages import FLOW_DONE_MESSAGE, RESTRICTED_ACCESS_MESSAGE, WELCOME_MESSAGE
+from .messages import FLOW_DONE_MESSAGE, RESTRICTED_ACCESS_MESSAGE, build_welcome_message
 from .models import Meeting, User, RegistrationStatus, WaitlistStatus
 from .storage import Database, is_registration_open
 from .scheduler import BotScheduler
@@ -1046,8 +1046,9 @@ class BotApp:
 
     async def _send_welcome_message(self, message, *, user_id: int | None = None) -> None:
         """Send the default /start welcome text."""
+        text = build_welcome_message(calendar_feed_url=self.settings.calendar_feed_url())
         await message.reply_text(
-            WELCOME_MESSAGE,
+            text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=self._main_menu_markup(user_id),

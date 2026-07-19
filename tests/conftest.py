@@ -88,12 +88,16 @@ def make_app(
     admin_user_ids: list[int] | None = None,
     channel_id: int | None = TEST_CHANNEL_ID,
     scheduler=None,
+    calendar_feed_token: str | None = None,
+    calendar_feed_base_url: str | None = None,
 ) -> BotApp:
     settings = Settings(
         telegram_bot_token="test-token",
         tz="Europe/Berlin",
         announcements_channel_id=channel_id,
         admin_user_ids=admin_user_ids or [],
+        calendar_feed_token=calendar_feed_token,
+        calendar_feed_base_url=calendar_feed_base_url,
     )
     if scheduler is None:
         scheduler = MagicMock()

@@ -1,3 +1,4 @@
+aiohttp>=3.9
 python-telegram-bot>=21.5
 SQLAlchemy>=2.0
 aiosqlite>=0.19
