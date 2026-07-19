@@ -78,7 +78,6 @@ from .registration_confirmation import (
     build_overlap_decline_keyboard,
     build_step1_keyboard,
     build_step2_keyboard,
-    build_step3_keyboard,
     build_unavailable_keyboard,
     format_cancelled,
     format_full,
@@ -88,7 +87,6 @@ from .registration_confirmation import (
     format_overlapping_meetings_summary,
     format_step1,
     format_step2,
-    format_step3,
     format_unavailable,
     preflight_registration,
 )
@@ -209,8 +207,6 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s1_no), pattern=r"^reg_s1_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_yes), pattern=r"^reg_s2_yes:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_no), pattern=r"^reg_s2_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_yes), pattern=r"^reg_s3_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_no), pattern=r"^reg_s3_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_yes), pattern=r"^reg_overlap_yes:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_no), pattern=r"^reg_overlap_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_details), pattern=r"^details:\d+$"))
@@ -2811,34 +2807,6 @@ class BotApp:
         if not cq:
             return
         await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        meeting = await self.db.get_meeting(meeting_id)
-        if meeting is None or meeting.canceled_at is not None:
-            await cq.message.reply_text(
-                format_unavailable(), reply_markup=build_unavailable_keyboard()
-            )
-            return
-        await cq.message.reply_text(
-            format_step3(), reply_markup=build_step3_keyboard(meeting_id)
-        )
-
-    async def cb_reg_s2_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        await self._reply_registration_cancelled(cq.message, meeting_id)
-
-    async def cb_reg_s3_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
         user = update.effective_user
         if not user:
             return
@@ -2875,6 +2843,16 @@ class BotApp:
             meeting_id=meeting_id,
         )
         await self._complete_registration(cq.message, meeting_id, user.id, db_user)
+
+    async def cb_reg_s2_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await self._reply_registration_cancelled(cq.message, meeting_id)
 
     async def cb_reg_overlap_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
@@ -2914,16 +2892,6 @@ class BotApp:
             format_overlap_declined(),
             reply_markup=build_overlap_decline_keyboard(meeting_id),
         )
-
-    async def cb_reg_s3_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        await self._reply_registration_cancelled(cq.message, meeting_id)
 
     async def cb_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Подробности' button presses to show meeting details."""

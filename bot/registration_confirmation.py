@@ -39,18 +39,9 @@ def format_step1(meeting: Meeting, local_tz) -> str:
 def format_step2() -> str:
     return (
         "Иногда мы записываемся с вдохновением, а потом понимаем, "
-        "что сил на встречу уже не осталось - и это очень по-человечески.\n\n"
-        "Пожалуйста, подумай: тебе правда сейчас окей добавить эту встречу в свои планы?"
-    )
-
-
-def format_step3() -> str:
-    return (
-        "Спасибо 💛\n\n"
-        "Последнее: хост готовится заранее, планирует место и вкладывает своё время. "
-        "Если планы изменятся, пожалуйста, отмени участие в боте как можно раньше - "
-        "так место сможет занять кто-то ещё.\n\n"
-        "Записать тебя на встречу?"
+        "что вся неделя плотная и сил на встречу не останется - "
+        "такое бывает и это очень по-человечески.\n\n"
+        "Пожалуйста, подумай еще раз пару секунд - тебя точно записать на встречу?"
     )
 
 
@@ -115,13 +106,6 @@ def build_step2_keyboard(meeting_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(text="Да, я хочу прийти", callback_data=f"reg_s2_yes:{meeting_id}"),
         InlineKeyboardButton(text="Пока не уверена", callback_data=f"reg_s2_no:{meeting_id}"),
-    ]])
-
-
-def build_step3_keyboard(meeting_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(text="Да, записаться", callback_data=f"reg_s3_yes:{meeting_id}"),
-        InlineKeyboardButton(text="Нет, вернуться", callback_data=f"reg_s3_no:{meeting_id}"),
     ]])
 
 

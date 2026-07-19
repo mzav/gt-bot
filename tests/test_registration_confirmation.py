@@ -17,7 +17,6 @@ from bot.registration_confirmation import (
     format_overlap_declined,
     format_overlapping_meetings_summary,
     format_step2,
-    format_step3,
     format_unavailable,
 )
 from tests.conftest import create_host, create_meeting, fill_meeting
@@ -93,20 +92,22 @@ async def test_reg_s1_yes_shows_step2(app, db):
 
 
 @pytest.mark.asyncio
-async def test_reg_s2_yes_shows_step3(app, db):
+async def test_reg_s2_yes_completes_registration(app, db):
     host_id = await create_host(db)
-    meeting_id = await create_meeting(db, host_id)
+    meeting_id = await create_meeting(db, host_id, max_participants=3)
+    await db.get_or_create_user(10, "Guest", "guest")
+    app._send_google_calendar_offer = AsyncMock()
 
     update = _make_callback_update(f"reg_s2_yes:{meeting_id}")
     await app.cb_reg_s2_yes(update, MagicMock())
 
+    assert await db.is_registered(meeting_id, 10)
     text = update.callback_query.message.reply_text.await_args.args[0]
-    assert text == format_step3()
-    kwargs = update.callback_query.message.reply_text.await_args.kwargs
-    assert f"reg_s3_yes:{meeting_id}" in _keyboard_callback_texts(kwargs["reply_markup"])
+    assert text == REGISTRATION_SUCCESS
+    app.scheduler.on_participant_change.assert_awaited_once()
 
 
-@pytest.mark.parametrize("callback", ["reg_s1_no", "reg_s2_no", "reg_s3_no"])
+@pytest.mark.parametrize("callback", ["reg_s1_no", "reg_s2_no"])
 @pytest.mark.asyncio
 async def test_negative_answers_cancel_flow(app, db, callback):
     host_id = await create_host(db)
@@ -116,7 +117,6 @@ async def test_negative_answers_cancel_flow(app, db, callback):
     handler = {
         "reg_s1_no": app.cb_reg_s1_no,
         "reg_s2_no": app.cb_reg_s2_no,
-        "reg_s3_no": app.cb_reg_s3_no,
     }[callback]
     await handler(update, MagicMock())
 
@@ -129,30 +129,14 @@ async def test_negative_answers_cancel_flow(app, db, callback):
 
 
 @pytest.mark.asyncio
-async def test_reg_s3_yes_completes_registration(app, db):
-    host_id = await create_host(db)
-    meeting_id = await create_meeting(db, host_id, max_participants=3)
-    await db.get_or_create_user(10, "Guest", "guest")
-    app._send_google_calendar_offer = AsyncMock()
-
-    update = _make_callback_update(f"reg_s3_yes:{meeting_id}")
-    await app.cb_reg_s3_yes(update, MagicMock())
-
-    assert await db.is_registered(meeting_id, 10)
-    text = update.callback_query.message.reply_text.await_args.args[0]
-    assert text == REGISTRATION_SUCCESS
-    app.scheduler.on_participant_change.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_reg_s3_yes_when_full_shows_waitlist(app, db):
+async def test_reg_s2_yes_when_full_shows_waitlist(app, db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id, max_participants=2)
     await fill_meeting(db, meeting_id, [11, 12])
     await db.get_or_create_user(10, "Guest", "guest")
 
-    update = _make_callback_update(f"reg_s3_yes:{meeting_id}")
-    await app.cb_reg_s3_yes(update, MagicMock())
+    update = _make_callback_update(f"reg_s2_yes:{meeting_id}")
+    await app.cb_reg_s2_yes(update, MagicMock())
 
     assert not await db.is_registered(meeting_id, 10)
     kwargs = update.callback_query.message.reply_text.await_args.kwargs
@@ -162,14 +146,14 @@ async def test_reg_s3_yes_when_full_shows_waitlist(app, db):
 
 
 @pytest.mark.asyncio
-async def test_reg_s3_yes_when_meeting_gone(app, db):
+async def test_reg_s2_yes_when_meeting_gone(app, db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
     await db.get_or_create_user(10, "Guest", "guest")
     await db.cancel_meeting(meeting_id, datetime.now(timezone.utc))
 
-    update = _make_callback_update(f"reg_s3_yes:{meeting_id}")
-    await app.cb_reg_s3_yes(update, MagicMock())
+    update = _make_callback_update(f"reg_s2_yes:{meeting_id}")
+    await app.cb_reg_s2_yes(update, MagicMock())
 
     text = update.callback_query.message.reply_text.await_args.args[0]
     assert text == format_unavailable()
@@ -238,7 +222,7 @@ async def test_offer_confirm_completes_registration(app, db, waitlist):
 
 
 @pytest.mark.asyncio
-async def test_reg_s3_yes_shows_overlap_confirm(app, db, local_tz):
+async def test_reg_s2_yes_shows_overlap_confirm(app, db, local_tz):
     host_id = await create_host(db)
     meeting_a_id = await create_meeting(
         db,
@@ -257,8 +241,8 @@ async def test_reg_s3_yes_shows_overlap_confirm(app, db, local_tz):
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_a_id, 10)
 
-    update = _make_callback_update(f"reg_s3_yes:{meeting_b_id}")
-    await app.cb_reg_s3_yes(update, MagicMock())
+    update = _make_callback_update(f"reg_s2_yes:{meeting_b_id}")
+    await app.cb_reg_s2_yes(update, MagicMock())
 
     assert not await db.is_registered(meeting_b_id, 10)
     meeting_a = await db.get_meeting(meeting_a_id)
