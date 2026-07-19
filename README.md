@@ -241,6 +241,14 @@ LITESTREAM_KEY_ID=your-b2-key-id
 LITESTREAM_SECRET=your-b2-application-key
 ```
 
+### Community iCal feed (optional)
+To enable the shared Google Calendar subscription URL shown in `/help`:
+1. Generate a secret token: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+2. Set `CALENDAR_FEED_TOKEN` and `CALENDAR_FEED_BASE_URL` (your Railway public URL, no trailing slash)
+3. Assign a public domain to the Railway service so `PORT` is exposed
+
+The feed is served at `/calendar/community/<token>.ics` alongside the bot process.
+
 ### Restore from backup
 ```
 litestream restore -config litestream.yml /data/gtbot.db
@@ -258,7 +266,7 @@ litestream restore -config litestream.yml /data/gtbot.db
 - v0: CRUD for meetings, registration, lists, reminders, edit/cancel ✓
 - v0.1: Meeting deep links from channel announcements ✓
 - v1: Waitlist auto-promotion, HTML escaping, global error handler ✓
-- v1.1: iCal export, richer formatting, pagination
+- v1.1: iCal community feed, richer formatting, pagination
 - v2: Web admin dashboard (optional)
 
 See `FUTURE_ADJUSTMENTS.md` for the current open items.

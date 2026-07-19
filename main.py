@@ -17,6 +17,7 @@ from bot.storage import Database
 from bot.scheduler import BotScheduler
 from bot.handlers import BotApp
 from bot.waitlist import WaitlistService
+from bot.calendar_feed_server import start_calendar_feed_server, stop_calendar_feed_server
 
 
 _CAPTION_LIMIT = 1024
@@ -181,6 +182,14 @@ async def main_async() -> None:
     scheduler.schedule_host_notifications(settings.notify_batch_interval_minutes)
     scheduler.schedule_waitlist_expiration(settings.waitlist_offer_check_interval_minutes)
 
+    feed_runner = None
+    if settings.calendar_feed_url() is not None:
+        feed_runner = await start_calendar_feed_server(
+            db=db,
+            settings=settings,
+            bot_username=bot_username,
+        )
+
     try:
         # Ensure scheduler is running even if post_init hook changes in PTB
         scheduler.start()
@@ -192,6 +201,7 @@ async def main_async() -> None:
         except (KeyboardInterrupt, SystemExit):
             pass
     finally:
+        await stop_calendar_feed_server(feed_runner)
         # Ensure updater is stopped before shutting down the application
         try:
             await application.updater.stop()

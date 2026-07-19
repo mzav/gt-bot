@@ -35,3 +35,22 @@ WELCOME_MESSAGE = (
     "Оставить <a href='https://forms.gle/vVEt78wAvj38RrwQ7'>обратную связь</a> ✅\n\n"
     "Давай делать организацию встреч проще вместе! ✨"
 )
+
+CALENDAR_SUBSCRIPTION_HELP = (
+    "🗓 Как добавить расписание встреч в Google Calendar одной постоянной ссылкой:\n\n"
+    "1. Открой Google Calendar на компьютере\n"
+    "2. В разделе Other calendars нажми “+”\n"
+    "3. Выбери “From URL”\n"
+    "4. Вставь эту ссылку:\n"
+    "    {calendar_feed_url}\n\n"
+    "Готово — встречи будут появляться в отдельном календаре. "
+    "Важно: Google Calendar может обновлять внешний календарь не сразу, "
+    "поэтому самая актуальная информация всегда остаётся в боте."
+)
+
+
+def build_welcome_message(*, calendar_feed_url: str | None = None) -> str:
+    """Build the /start and /help welcome text, optionally with calendar subscription info."""
+    if not calendar_feed_url:
+        return WELCOME_MESSAGE
+    return f"{WELCOME_MESSAGE}\n\n{CALENDAR_SUBSCRIPTION_HELP.format(calendar_feed_url=calendar_feed_url)}"

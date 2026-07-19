@@ -57,6 +57,10 @@ class Settings(BaseModel):
     waitlist_offer_expiry_hours: int = 6
     waitlist_offer_check_interval_minutes: int = 15
 
+    calendar_feed_token: str | None = None
+    calendar_feed_base_url: str | None = None
+    calendar_feed_port: int = 8080
+
     def tzinfo(self) -> zoneinfo.ZoneInfo:
         """Return ZoneInfo instance for the configured time zone."""
         return zoneinfo.ZoneInfo(self.tz)
@@ -82,6 +86,13 @@ class Settings(BaseModel):
     def daily_check_time_parsed(self) -> time:
         """Return the parsed daily check time, defaulting to 09:00."""
         return self.parse_time(self.daily_check_time, time(9, 0))
+
+    def calendar_feed_url(self) -> str | None:
+        """Return the public iCal feed URL when token and base URL are configured."""
+        if not self.calendar_feed_token or not self.calendar_feed_base_url:
+            return None
+        base = self.calendar_feed_base_url.rstrip("/")
+        return f"{base}/calendar/community/{self.calendar_feed_token}.ics"
 
 
 def load_settings() -> Settings:
@@ -113,6 +124,9 @@ def load_settings() -> Settings:
     admin_user_ids = [int(x) for x in admin_ids_env.split(",") if x.strip().lstrip("-").isdigit()]
     waitlist_offer_expiry_hours = int(os.getenv("WAITLIST_OFFER_EXPIRY_HOURS", "6"))
     waitlist_offer_check_interval_minutes = int(os.getenv("WAITLIST_OFFER_CHECK_INTERVAL_MINUTES", "15"))
+    calendar_feed_token = os.getenv("CALENDAR_FEED_TOKEN", "").strip() or None
+    calendar_feed_base_url = os.getenv("CALENDAR_FEED_BASE_URL", "").strip().rstrip("/") or None
+    calendar_feed_port = int(os.getenv("PORT", os.getenv("CALENDAR_FEED_PORT", "8080")))
 
     return Settings(
         telegram_bot_token=token,
@@ -129,4 +143,7 @@ def load_settings() -> Settings:
         admin_user_ids=admin_user_ids,
         waitlist_offer_expiry_hours=waitlist_offer_expiry_hours,
         waitlist_offer_check_interval_minutes=waitlist_offer_check_interval_minutes,
+        calendar_feed_token=calendar_feed_token,
+        calendar_feed_base_url=calendar_feed_base_url,
+        calendar_feed_port=calendar_feed_port,
     )

@@ -27,11 +27,18 @@ def _keyboard_button_texts(keyboard) -> list[str]:
     return [btn.text for row in keyboard.keyboard for btn in row]
 
 
-def _make_app(*, admin_user_ids: list[int] | None = None) -> BotApp:
+def _make_app(
+    *,
+    admin_user_ids: list[int] | None = None,
+    calendar_feed_token: str | None = None,
+    calendar_feed_base_url: str | None = None,
+) -> BotApp:
     settings = Settings(
         telegram_bot_token="test-token",
         announcements_channel_id=TEST_CHANNEL_ID,
         admin_user_ids=admin_user_ids or [],
+        calendar_feed_token=calendar_feed_token,
+        calendar_feed_base_url=calendar_feed_base_url,
     )
     return BotApp(settings, MagicMock(), MagicMock(), MagicMock())
 
@@ -147,3 +154,34 @@ async def test_send_welcome_message_includes_main_menu():
     kwargs = message.reply_text.await_args.kwargs
     labels = _keyboard_button_texts(kwargs["reply_markup"])
     assert MENU_FORCE_SUMMARY in labels
+
+
+@pytest.mark.asyncio
+async def test_send_welcome_message_includes_calendar_subscription_when_configured():
+    feed_url = "https://example.test/calendar/community/secret-token.ics"
+    app = _make_app(
+        calendar_feed_token="secret-token",
+        calendar_feed_base_url="https://example.test",
+    )
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+
+    await app._send_welcome_message(message, user_id=1)
+
+    text = message.reply_text.await_args.args[0]
+    assert "Google Calendar" in text
+    assert feed_url in text
+    assert "From URL" in text
+
+
+@pytest.mark.asyncio
+async def test_send_welcome_message_omits_calendar_subscription_when_not_configured():
+    app = _make_app()
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+
+    await app._send_welcome_message(message, user_id=1)
+
+    text = message.reply_text.await_args.args[0]
+    assert "Google Calendar" not in text
+    assert "From URL" not in text
