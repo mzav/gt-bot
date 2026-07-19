@@ -10,7 +10,7 @@ from bot.models import Meeting
 from bot.registration_confirmation import (
     format_overlap_confirm,
     format_step1,
-    format_step3,
+    format_step2,
     preflight_registration,
 )
 from tests.conftest import create_host, create_meeting, fill_meeting
@@ -32,8 +32,10 @@ def test_format_step1(local_tz):
     assert "свободна" in text.lower()
 
 
-def test_format_step3():
-    assert "Записать тебя" in format_step3()
+def test_format_step2():
+    text = format_step2()
+    assert "вся неделя плотная" in text
+    assert "записать на встречу" in text
 
 
 def test_format_overlap_confirm():

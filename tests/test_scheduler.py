@@ -74,9 +74,58 @@ async def test_on_participant_change_instant_below_threshold(db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
     meeting = await db.get_meeting(meeting_id)
-    user = await db.get_user(host_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
     await scheduler.on_participant_change(meeting, user, "joined", confirmed_count=1)
     bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Anna Test" in text
+    assert "@anna" in text
+    assert "Участников: 1 /" in text
+    assert "https://t.me/anna" in text
+
+
+@pytest.mark.asyncio
+async def test_on_participant_change_instant_leave_with_reason(db):
+    scheduler, _, bot = _make_scheduler(db, threshold=10)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    meeting = await db.get_meeting(meeting_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
+    await scheduler.on_participant_change(
+        meeting,
+        user,
+        "left",
+        confirmed_count=2,
+        reason_type="ill",
+    )
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "отменила участие" in text
+    assert "Причина: Болезнь" in text
+    assert "Участников: 2 /" in text
+    assert "В waitlist никого нет" in text
+
+
+@pytest.mark.asyncio
+async def test_on_participant_change_instant_leave_with_waitlist_offer(db):
+    scheduler, _, bot = _make_scheduler(db, threshold=10)
+    host_id = await create_host(db)
+    meeting_id = await create_meeting(db, host_id)
+    meeting = await db.get_meeting(meeting_id)
+    user = await db.get_or_create_user(99, "Anna Test", "anna")
+    offered = await db.get_or_create_user(88, "Waitlist Girl", "wluser")
+    await scheduler.on_participant_change(
+        meeting,
+        user,
+        "left",
+        confirmed_count=3,
+        reason_type="family",
+        offered_user=offered,
+    )
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Причина: Семейные обстоятельства" in text
+    assert "Отправлено приглашение:" in text
+    assert "Waitlist Girl" in text
+    assert "@wluser" in text
 
 
 @pytest.mark.asyncio
@@ -97,10 +146,25 @@ async def test_flush_pending_notifications(db):
     host_id = await create_host(db)
     meeting_id = await create_meeting(db, host_id)
     meeting = await db.get_meeting(meeting_id)
-    user = await db.get_user(host_id)
-    await scheduler.on_participant_change(meeting, user, "joined", confirmed_count=5)
+    joiner = await db.get_or_create_user(50, "Join Girl", "joiner")
+    leaver = await db.get_or_create_user(51, "Leave Girl", "leaver")
+    await scheduler.on_participant_change(meeting, joiner, "joined", confirmed_count=5)
+    await scheduler.on_participant_change(
+        meeting,
+        leaver,
+        "left",
+        confirmed_count=5,
+        reason_type="other",
+        reason_text="Срочная поездка",
+    )
     await scheduler._flush_pending_notifications()
     bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Записались:" in text
+    assert "Join Girl" in text
+    assert "Отменили:" in text
+    assert "Leave Girl" in text
+    assert "(Срочная поездка)" in text
     assert not scheduler._pending_events
 
 
@@ -133,10 +197,14 @@ async def test_plan_urgent_announcement_publishes_immediately(db):
     meeting_id = await create_meeting(
         db,
         host_id,
-        start_at_utc=datetime(2026, 12, 25, 18, 0, 0, tzinfo=timezone.utc),
+        start_at_utc=datetime(2026, 7, 14, 16, 0, 0, tzinfo=timezone.utc),
     )
     meeting = await db.get_meeting(meeting_id)
-    await scheduler.plan_urgent_announcement(meeting)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 1, 12, 0, 0, tzinfo=scheduler._tz)
+        await scheduler.plan_urgent_announcement(meeting)
     send_channel_card.assert_awaited_once()
     updated = await db.get_meeting(meeting_id)
     assert updated.urgent_announce_posted_at_utc is not None
@@ -177,8 +245,11 @@ async def test_plan_urgent_announcement_defers_to_reg_start(db):
     meeting = await db.get_meeting(meeting_id)
     from unittest.mock import patch
 
-    with patch("bot.scheduler.datetime") as mock_dt:
-        mock_dt.now.return_value = datetime(2026, 6, 23, 12, 0, 0, tzinfo=berlin)
+    now = datetime(2026, 6, 23, 12, 0, 0, tzinfo=berlin)
+    with patch("bot.scheduler.datetime") as mock_dt, patch(
+        "bot.scheduler.utc_now", return_value=datetime(2026, 6, 23, 10, 0, 0, tzinfo=timezone.utc)
+    ):
+        mock_dt.now.return_value = now
         await scheduler.plan_urgent_announcement(meeting)
     send_channel_card.assert_not_awaited()
     updated = await db.get_meeting(meeting_id)
@@ -214,10 +285,14 @@ async def test_maybe_announce_new_meeting_sends(db):
     meeting_id = await create_meeting(
         db,
         host_id,
-        start_at_utc=datetime(2026, 12, 25, 18, 0, 0, tzinfo=timezone.utc),
+        start_at_utc=datetime(2026, 7, 14, 16, 0, 0, tzinfo=timezone.utc),
     )
     meeting = await db.get_meeting(meeting_id)
-    await scheduler.maybe_announce_new_meeting(meeting)
+    from unittest.mock import patch
+
+    with patch("bot.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 1, 12, 0, 0, tzinfo=scheduler._tz)
+        await scheduler.maybe_announce_new_meeting(meeting)
     send_channel_card.assert_awaited_once()
 
 

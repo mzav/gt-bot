@@ -78,7 +78,6 @@ from .registration_confirmation import (
     build_overlap_decline_keyboard,
     build_step1_keyboard,
     build_step2_keyboard,
-    build_step3_keyboard,
     build_unavailable_keyboard,
     format_cancelled,
     format_full,
@@ -88,7 +87,6 @@ from .registration_confirmation import (
     format_overlapping_meetings_summary,
     format_step1,
     format_step2,
-    format_step3,
     format_unavailable,
     preflight_registration,
 )
@@ -209,8 +207,6 @@ class BotApp:
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s1_no), pattern=r"^reg_s1_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_yes), pattern=r"^reg_s2_yes:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_s2_no), pattern=r"^reg_s2_no:\d+$"))
-        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_yes), pattern=r"^reg_s3_yes:\d+$"))
-        app.add_handler(CallbackQueryHandler(G(self.cb_reg_s3_no), pattern=r"^reg_s3_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_yes), pattern=r"^reg_overlap_yes:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_reg_overlap_no), pattern=r"^reg_overlap_no:\d+$"))
         app.add_handler(CallbackQueryHandler(G(self.cb_details), pattern=r"^details:\d+$"))
@@ -863,9 +859,16 @@ class BotApp:
             if meeting:
                 db_user = await self.db.get_user(user_id)
                 if db_user:
-                    confirmed = await self.db.count_confirmed(meeting_id)
-                    await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
-                await self._process_waitlist_after_unregister(meeting_id)
+                    notifications = await self._process_waitlist_after_unregister(meeting_id)
+                    await self._notify_host_after_leave(
+                        meeting,
+                        db_user,
+                        reason_type=reason_type,
+                        reason_text=reason_text,
+                        notifications=notifications,
+                    )
+                else:
+                    await self._process_waitlist_after_unregister(meeting_id)
         else:
             err = f"Не удалось отменить участие: {msg}"
             if edit:
@@ -1008,10 +1011,34 @@ class BotApp:
             return
         await send_offer_dms(self.scheduler._bot, self.waitlist, notifications)
 
-    async def _process_waitlist_after_unregister(self, meeting_id: int) -> None:
+    async def _process_waitlist_after_unregister(self, meeting_id: int) -> list[OfferNotification]:
         now_utc = datetime.now(tz.UTC)
         notifications = await self.waitlist.process_available_spots(meeting_id, now_utc)
         await self._send_waitlist_offer_dms(notifications)
+        return notifications
+
+    async def _notify_host_after_leave(
+        self,
+        meeting: Meeting,
+        db_user,
+        *,
+        reason_type: str | None = None,
+        reason_text: str | None = None,
+        notifications: list[OfferNotification] | None = None,
+    ) -> None:
+        confirmed = await self.db.count_confirmed(meeting.id)
+        offered_user = None
+        if notifications:
+            offered_user = await self.db.get_user(notifications[0].user_id)
+        await self.scheduler.on_participant_change(
+            meeting,
+            db_user,
+            "left",
+            confirmed,
+            reason_type=reason_type,
+            reason_text=reason_text,
+            offered_user=offered_user,
+        )
 
     async def _send_upcoming_meeting_entry(
         self,
@@ -2747,9 +2774,12 @@ class BotApp:
         if ok:
             meeting = await self.db.get_meeting(meeting_id)
             if meeting:
-                confirmed = await self.db.count_confirmed(meeting_id)
-                await self.scheduler.on_participant_change(meeting, db_user, "left", confirmed)
-                await self._process_waitlist_after_unregister(meeting_id)
+                notifications = await self._process_waitlist_after_unregister(meeting_id)
+                await self._notify_host_after_leave(
+                    meeting,
+                    db_user,
+                    notifications=notifications,
+                )
 
     # ========== Callback Query Handlers ==========
 
@@ -2811,34 +2841,6 @@ class BotApp:
         if not cq:
             return
         await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        meeting = await self.db.get_meeting(meeting_id)
-        if meeting is None or meeting.canceled_at is not None:
-            await cq.message.reply_text(
-                format_unavailable(), reply_markup=build_unavailable_keyboard()
-            )
-            return
-        await cq.message.reply_text(
-            format_step3(), reply_markup=build_step3_keyboard(meeting_id)
-        )
-
-    async def cb_reg_s2_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        await self._reply_registration_cancelled(cq.message, meeting_id)
-
-    async def cb_reg_s3_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
         user = update.effective_user
         if not user:
             return
@@ -2875,6 +2877,16 @@ class BotApp:
             meeting_id=meeting_id,
         )
         await self._complete_registration(cq.message, meeting_id, user.id, db_user)
+
+    async def cb_reg_s2_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cq = update.callback_query
+        if not cq:
+            return
+        await cq.answer()
+        meeting_id = self._parse_callback_meeting_id(cq.data or "")
+        if meeting_id is None:
+            return
+        await self._reply_registration_cancelled(cq.message, meeting_id)
 
     async def cb_reg_overlap_yes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cq = update.callback_query
@@ -2914,16 +2926,6 @@ class BotApp:
             format_overlap_declined(),
             reply_markup=build_overlap_decline_keyboard(meeting_id),
         )
-
-    async def cb_reg_s3_no(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        cq = update.callback_query
-        if not cq:
-            return
-        await cq.answer()
-        meeting_id = self._parse_callback_meeting_id(cq.data or "")
-        if meeting_id is None:
-            return
-        await self._reply_registration_cancelled(cq.message, meeting_id)
 
     async def cb_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline 'Подробности' button presses to show meeting details."""

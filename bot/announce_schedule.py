@@ -27,13 +27,13 @@ def covered_by_future_announcement(
     """Return True if meeting_date will appear in a scheduled digest before it occurs."""
     sorted_days = sorted(announce_days)
     year, month = today.year, today.month
-    for _ in range(2):
+    while date(year, month, 1) <= meeting_date:
         for d in sorted_days:
             try:
                 announce_date = date(year, month, d)
             except ValueError:
                 continue
-            if announce_date <= today or announce_date >= meeting_date:
+            if announce_date <= today or announce_date > meeting_date:
                 continue
             from_date, to_date = announcement_window(sorted_days, announce_date)
             if from_date <= meeting_date <= to_date:
@@ -41,8 +41,6 @@ def covered_by_future_announcement(
         month += 1
         if month > 12:
             month, year = 1, year + 1
-        if date(year, month, 1) > meeting_date:
-            break
     return False
 
 

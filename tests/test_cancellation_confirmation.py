@@ -156,7 +156,11 @@ async def test_leave_other_text_proceeds_to_confirm(app, db):
 @pytest.mark.asyncio
 async def test_leave_confirm_cancels_and_stores_reason(app, db):
     host_id = await create_host(db)
-    meeting_id = await create_meeting(db, host_id)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 12, 1, 18, 0, 0, tzinfo=timezone.utc),
+    )
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_id, 10)
 
@@ -164,6 +168,19 @@ async def test_leave_confirm_cancels_and_stores_reason(app, db):
 
     context = MagicMock()
     context.user_data = {}
+    call_order: list[str] = []
+
+    real_process = app.waitlist.process_available_spots
+
+    async def track_waitlist(*args, **kwargs):
+        call_order.append("waitlist")
+        return await real_process(*args, **kwargs)
+
+    async def track_host(*args, **kwargs):
+        call_order.append("host")
+
+    app.waitlist.process_available_spots = track_waitlist
+    app.scheduler.on_participant_change = AsyncMock(side_effect=track_host)
 
     await app.cb_leave_confirm(update, context)
 
@@ -174,12 +191,20 @@ async def test_leave_confirm_cancels_and_stores_reason(app, db):
     assert reg.cancellation_reason_text is None
     assert reg.cancelled_at is not None
     app.scheduler.on_participant_change.assert_awaited_once()
+    kwargs = app.scheduler.on_participant_change.await_args.kwargs
+    assert kwargs["reason_type"] == CancellationReasonType.ILL
+    assert kwargs.get("reason_text") is None
+    assert call_order == ["waitlist", "host"]
 
 
 @pytest.mark.asyncio
 async def test_leave_confirm_other_stores_free_text(app, db):
     host_id = await create_host(db)
-    meeting_id = await create_meeting(db, host_id)
+    meeting_id = await create_meeting(
+        db,
+        host_id,
+        start_at_utc=datetime(2026, 12, 1, 18, 0, 0, tzinfo=timezone.utc),
+    )
     await db.get_or_create_user(10, "Guest", "guest")
     await db.register(meeting_id, 10)
 
@@ -193,6 +218,9 @@ async def test_leave_confirm_other_stores_free_text(app, db):
     reg = await db.get_canceled_registration(meeting_id, 10)
     assert reg.cancellation_reason_type == CancellationReasonType.OTHER
     assert reg.cancellation_reason_text == "Срочная поездка"
+    kwargs = app.scheduler.on_participant_change.await_args.kwargs
+    assert kwargs["reason_type"] == CancellationReasonType.OTHER
+    assert kwargs["reason_text"] == "Срочная поездка"
 
 
 @pytest.mark.asyncio
