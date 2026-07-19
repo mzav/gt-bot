@@ -43,7 +43,7 @@ class PreflightResult:
 def format_reason_prompt(meeting: Meeting, local_tz) -> str:
     when = format_meeting_time(meeting, local_tz, style="short")
     return (
-        "Жаль, что планы изменились 🌿\n\n"
+        "Жаль, что планы изменились 💔\n\n"
         f"📌 {meeting.topic}\n"
         f"📅 {when}\n\n"
         "Подскажи, пожалуйста, почему не получится прийти?"
